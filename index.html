@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="Merged Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Built from two Notion templates.">
+  <title>Habit Tracker — Merged Template</title>
+  <link rel="icon" type="image/png" href="assets/banner.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+  <div class="app-container">
+
+    <!-- ═══════════════════════════════════════════════════════
+       SOURCE TEMPLATE SECTIONS (above)
+       ═══════════════════════════════════════════════════════ -->
+
+    <!-- App Header (Icon and Title) -->
+    <header class="app-header">
+      <img src="assets/banner.png" alt="App Icon" class="app-icon">
+      <h1 class="app-title">Habit Tracker</h1>
+    </header>
+
+    <!-- Time Left Widget (from source) -->
+    <div class="widget-embed" id="widget-time-left">
+      <iframe src="https://shoroukaziz.github.io/notion_widgets/minimal/minimal-time-left-month.html"
+        title="Time left in month" loading="lazy"></iframe>
+    </div>
+
+    <!-- Month Navigation (shared by month overview + heat map) -->
+    <div class="month-nav" id="month-nav">
+      <button onclick="prevMonth()" aria-label="Previous month">◀</button>
+      <span class="month-label" id="month-label">July 2026</span>
+      <button onclick="nextMonth()" aria-label="Next month">▶</button>
+    </div>
+
+    <!-- ── 1. Week Overview (from source) ─────────────────── -->
+    <div class="section-card" id="section-week">
+      <div class="section-header">
+        <div class="icon calendar-week">📅</div>
+        <h2>Week Overview</h2>
+      </div>
+      <div class="table-wrapper">
+        <table class="data-table" id="week-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Progress</th>
+              <th>💤</th>
+              <th>😌</th>
+              <th>📱</th>
+              <th>✍️</th>
+              <th>💧</th>
+              <th>💻</th>
+              <th>💪</th>
+              <th>📖</th>
+              <th>🚶</th>
+              <th>📋</th>
+              <th>Status</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="week-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── 2. Habit List & Management ────────────────────── -->
+    <div class="section-card" id="section-habits">
+      <div class="habit-list-container">
+        <div class="habit-list-header">
+          <span class="habit-list-label">Habit List</span>
+          <form class="add-habit-form" id="add-habit-form">
+            <input type="text" id="new-habit-name" placeholder="New habit name..." required>
+            <select id="new-habit-importance" required>
+              <option value="1">Normal (1x)</option>
+              <option value="2">High (2x)</option>
+              <option value="0.5">Low (0.5x)</option>
+            </select>
+            <button type="submit" id="add-habit-btn" class="btn-primary">Add</button>
+          </form>
+        </div>
+        <div class="habit-list-grid" id="habit-list-grid">
+          <!-- Rendered by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 3. Full Month Overview (from source) ───────────── -->
+    <div class="section-card" id="section-month">
+      <div class="section-header">
+        <div class="icon calendar">📆</div>
+        <h2>Full Month Overview</h2>
+      </div>
+      <div class="table-wrapper" style="max-height: 520px; overflow-y: auto;">
+        <table class="data-table" id="month-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Progress</th>
+              <th>💤</th>
+              <th>😌</th>
+              <th>📱</th>
+              <th>✍️</th>
+              <th>💧</th>
+              <th>💻</th>
+              <th>💪</th>
+              <th>📖</th>
+              <th>🚶</th>
+              <th>📋</th>
+              <th>Status</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="month-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── 4. Habit Streak Heat Map (NEW — replaces Monthly Performance Overview) ── -->
+    <div class="section-card" id="section-heatmap">
+      <div class="section-header">
+        <div class="icon heatmap">🗓️</div>
+        <h2>Habit Streak Heat Map</h2>
+      </div>
+
+      <!-- Color legend -->
+      <div class="heatmap-legend">
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-0);"></div>
+          <span>0%</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-red);"></div>
+          <span>1–20%</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-orange);"></div>
+          <span>21–40%</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-yellow);"></div>
+          <span>41–60%</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-blue);"></div>
+          <span>61–84%</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background: var(--heat-green);"></div>
+          <span>85–100%</span>
+        </div>
+      </div>
+
+      <div class="heatmap-container">
+        <div class="heatmap-grid" id="heatmap-grid">
+          <!-- Rendered by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 5. Streak Milestones (from source) ─────────────── -->
+    <div class="section-card" id="section-streaks">
+      <div class="section-header">
+        <div class="icon fire">🔥</div>
+        <h2>Streak Milestones</h2>
+      </div>
+
+      <div class="streak-tip">
+        <code>Track your perfect days and unlock epic milestones!</code><br>
+        <code>A perfect day = All 10 habits completed (🔥 Keep it up!)</code>
+      </div>
+
+      <div class="streak-counter">
+        <span class="fire-icon">🔥</span>
+        <span class="streak-label">Current Streak</span>
+        <span class="streak-value" id="streak-value">0</span>
+      </div>
+
+      <div class="milestone-header">
+        <span>Milestone</span>
+        <span>Target</span>
+        <span>Status</span>
+        <span>Achieved</span>
+        <span>Reward</span>
+      </div>
+
+      <div class="milestones-grid" id="milestones-list">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- ── 6. How This System Works (from source) ─────────── -->
+    <div class="section-card" id="section-howto">
+      <div class="section-header">
+        <div class="icon wrench">🔧</div>
+        <h2>How This System Works</h2>
+      </div>
+      <div class="how-it-works">
+        <dl>
+          <dt>Progress Bar</dt>
+          <dd>Tracks your daily habit completion percentage. Each day shows a visual progress bar to help you hit your
+            goals.</dd>
+
+          <dt>Week Overview</dt>
+          <dd>Get a clear snapshot of your entire week, including daily progress and completion rates to help you stay
+            consistent.</dd>
+
+          <dt>Full Month Overview</dt>
+          <dd>Track your habits across the full month. Quickly identify patterns and areas for improvement.</dd>
+
+          <dt>Habit Streak Heat Map</dt>
+          <dd>Visual calendar showing your daily completion percentage with color coding — from red (0–20%) to green
+            (85–100%). Spot your consistency patterns at a glance.</dd>
+
+          <dt>Streak Milestones</dt>
+          <dd>Celebrate your perfect days when you complete all 10 habits. Build momentum and unlock milestones!</dd>
+
+          <dt>Habit List</dt>
+          <dd>Track up to 10 core habits across productivity, health, and personal growth — all in one place.</dd>
+        </dl>
+
+        <div class="customization-tips">
+          <h3>Customization Tips</h3>
+          <ul>
+            <li>To change your habits — Edit the habit names in <code>data/habits.json</code> and reload</li>
+            <li>To reset all data — Click the reset button in the footer or clear localStorage</li>
+            <li>Your data is saved automatically in your browser's localStorage</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════
+       TEMPLATE DIVIDER
+       ═══════════════════════════════════════════════════════ -->
+    <div class="template-divider">
+      Analytics &amp; Charts
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════
+       DESTINATION TEMPLATE SECTIONS (below)
+       ═══════════════════════════════════════════════════════ -->
+
+    <!-- ── 7. Analytics Charts (from destination) ─────────── -->
+    <div class="section-card" id="section-analytics">
+      <div class="section-header">
+        <div class="icon chart">📊</div>
+        <h2>Analytics</h2>
+      </div>
+      <div class="charts-grid">
+        <div class="chart-container">
+          <canvas id="chart-trend"></canvas>
+        </div>
+        <div class="chart-container">
+          <canvas id="chart-donut"></canvas>
+        </div>
+        <div class="chart-container chart-wide">
+          <canvas id="chart-bar"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 8. Database Reference (from destination) ───────── -->
+    <div class="section-card" id="section-database">
+      <div class="section-header">
+        <div class="icon database">🗄️</div>
+        <h2>Database</h2>
+      </div>
+      <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
+        The main habit data is stored locally in your browser. It follows the source template's structure:
+        <strong>one row per day</strong> with 10 habit columns (Yes/No checkboxes), a computed progress bar,
+        notes, and month grouping. Data persists via localStorage.
+      </p>
+    </div>
+
+    <!-- ── 9. Setup Guide (from destination) ──────────────── -->
+    <div class="section-card setup-guide" id="section-setup">
+      <h3>💡 Start Here: Set Up the Template</h3>
+
+      <div class="setup-step">
+        <h4>1️⃣ Connect your database to analytics (charts)</h4>
+        <p>To make the charts work with <strong>your own data</strong>, follow this guide:</p>
+        <p>👉 <a href="https://notionstats.com/blog/guide-to-adding-analytics-to-your-notion" target="_blank"
+            rel="noopener">Guide on adding custom charts</a></p>
+        <ul>
+          <li>Connect your Database</li>
+          <li>Create charts based on your data</li>
+        </ul>
+      </div>
+
+      <div class="setup-step">
+        <h4>2️⃣ Replace the existing chart embeds</h4>
+        <p>After creating your charts:</p>
+        <ul>
+          <li>Copy the <strong>embed links</strong> from NotionStats</li>
+          <li>Replace the existing chart embeds in this template with your new links</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Merged Habit Tracker — Source + Analytics Templates</p>
+      <p style="margin-top: var(--space-xs);">
+        <a href="javascript:void(0)" onclick="resetData()"
+          style="color: var(--text-muted); text-decoration: underline; cursor: pointer; font-size: 0.7rem;">Reset all
+          data</a>
+      </p>
+    </footer>
+
+  </div>
+
+  <script src="app.js"></script>
+
+</body>
+
+</html>

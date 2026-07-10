@@ -1,0 +1,16 @@
+{
+  "months": [
+    { "name": "January | 26", "average": 0 },
+    { "name": "February | 26", "average": 13.93 },
+    { "name": "March | 26", "average": 42.58 },
+    { "name": "April | 26", "average": 0 },
+    { "name": "May | 26", "average": 0 },
+    { "name": "June | 26", "average": 0 },
+    { "name": "July | 26", "average": 0 },
+    { "name": "August | 26", "average": 0 },
+    { "name": "September | 26", "average": 0 },
+    { "name": "October | 26", "average": 0 },
+    { "name": "November | 26", "average": 0 },
+    { "name": "December | 26", "average": 0 }
+  ]
+}
