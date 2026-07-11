@@ -5,8 +5,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description"
-    content="Merged Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Built from two Notion templates.">
-  <title>Habit Tracker — Merged Template</title>
+    content="Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Synced live with Notion.">
+  <title>Habit Tracker — Live Notion Sync</title>
   <link rel="icon" type="image/png" href="assets/banner.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -16,15 +16,16 @@
 
   <div class="app-container">
 
-    <!-- ═══════════════════════════════════════════════════════
-       SOURCE TEMPLATE SECTIONS (above)
-       ═══════════════════════════════════════════════════════ -->
-
     <!-- App Header (Icon and Title) -->
     <header class="app-header">
       <img src="assets/banner.png" alt="App Icon" class="app-icon">
       <h1 class="app-title">Habit Tracker</h1>
     </header>
+
+    <!-- Sync status banner -->
+    <div class="section-card" id="sync-status" style="display:none; padding: 10px 16px;">
+      <span id="sync-status-text" style="font-size:0.8rem; color: var(--text-secondary);"></span>
+    </div>
 
     <!-- Time Left Widget (from source) -->
     <div class="widget-embed" id="widget-time-left">
@@ -39,7 +40,7 @@
       <button onclick="nextMonth()" aria-label="Next month">▶</button>
     </div>
 
-    <!-- ── 1. Week Overview (from source) ─────────────────── -->
+    <!-- ── 1. Week Overview ────────────────────────────────── -->
     <div class="section-card" id="section-week">
       <div class="section-header">
         <div class="icon calendar-week">📅</div>
@@ -70,7 +71,7 @@
       </div>
     </div>
 
-    <!-- ── 2. Habit List & Management ────────────────────── -->
+    <!-- ── 2. Habit List (read-only display — habits are managed in Notion now) ── -->
     <div class="section-card" id="section-habits">
       <div class="habit-list-container">
         <div class="habit-list-header">
@@ -91,7 +92,7 @@
       </div>
     </div>
 
-    <!-- ── 3. Full Month Overview (from source) ───────────── -->
+    <!-- ── 3. Full Month Overview ──────────────────────────── -->
     <div class="section-card" id="section-month">
       <div class="section-header">
         <div class="icon calendar">📆</div>
@@ -122,14 +123,13 @@
       </div>
     </div>
 
-    <!-- ── 4. Habit Streak Heat Map (NEW — replaces Monthly Performance Overview) ── -->
+    <!-- ── 4. Habit Streak Heat Map ────────────────────────── -->
     <div class="section-card" id="section-heatmap">
       <div class="section-header">
         <div class="icon heatmap">🗓️</div>
         <h2>Habit Streak Heat Map</h2>
       </div>
 
-      <!-- Color legend -->
       <div class="heatmap-legend">
         <div class="legend-item">
           <div class="legend-swatch" style="background: var(--heat-0);"></div>
@@ -164,7 +164,7 @@
       </div>
     </div>
 
-    <!-- ── 5. Streak Milestones (from source) ─────────────── -->
+    <!-- ── 5. Streak Milestones ────────────────────────────── -->
     <div class="section-card" id="section-streaks">
       <div class="section-header">
         <div class="icon fire">🔥</div>
@@ -173,7 +173,7 @@
 
       <div class="streak-tip">
         <code>Track your perfect days and unlock epic milestones!</code><br>
-        <code>A perfect day = All 10 habits completed (🔥 Keep it up!)</code>
+        <code>A perfect day = All habits completed (🔥 Keep it up!)</code>
       </div>
 
       <div class="streak-counter">
@@ -195,7 +195,7 @@
       </div>
     </div>
 
-    <!-- ── 6. How This System Works (from source) ─────────── -->
+    <!-- ── 6. How This System Works ────────────────────────── -->
     <div class="section-card" id="section-howto">
       <div class="section-header">
         <div class="icon wrench">🔧</div>
@@ -204,50 +204,41 @@
       <div class="how-it-works">
         <dl>
           <dt>Progress Bar</dt>
-          <dd>Tracks your daily habit completion percentage. Each day shows a visual progress bar to help you hit your
-            goals.</dd>
+          <dd>Tracks your daily habit completion percentage, computed from your live Notion data.</dd>
 
           <dt>Week Overview</dt>
-          <dd>Get a clear snapshot of your entire week, including daily progress and completion rates to help you stay
-            consistent.</dd>
+          <dd>Get a clear snapshot of your entire week, including daily progress and completion rates.</dd>
 
           <dt>Full Month Overview</dt>
-          <dd>Track your habits across the full month. Quickly identify patterns and areas for improvement.</dd>
+          <dd>Track your habits across the full month, pulled live from your Notion database.</dd>
 
           <dt>Habit Streak Heat Map</dt>
           <dd>Visual calendar showing your daily completion percentage with color coding — from red (0–20%) to green
-            (85–100%). Spot your consistency patterns at a glance.</dd>
+            (85–100%).</dd>
 
           <dt>Streak Milestones</dt>
-          <dd>Celebrate your perfect days when you complete all 10 habits. Build momentum and unlock milestones!</dd>
+          <dd>Celebrate your perfect days when you complete every habit. Build momentum and unlock milestones!</dd>
 
           <dt>Habit List</dt>
-          <dd>Track up to 10 core habits across productivity, health, and personal growth — all in one place.</dd>
+          <dd>Mirrors the checkbox columns in your connected Notion database.</dd>
         </dl>
 
         <div class="customization-tips">
           <h3>Customization Tips</h3>
           <ul>
-            <li>To change your habits — Edit the habit names in <code>data/habits.json</code> and reload</li>
-            <li>To reset all data — Click the reset button in the footer or clear localStorage</li>
-            <li>Your data is saved automatically in your browser's localStorage</li>
+            <li>To add/remove/rename habits — edit the checkbox columns directly in Notion</li>
+            <li>Checking a box here writes straight back to your Notion database</li>
+            <li>Data is never stored in this browser — every load re-reads Notion live</li>
           </ul>
         </div>
       </div>
     </div>
 
-    <!-- ═══════════════════════════════════════════════════════
-       TEMPLATE DIVIDER
-       ═══════════════════════════════════════════════════════ -->
     <div class="template-divider">
       Analytics &amp; Charts
     </div>
 
-    <!-- ═══════════════════════════════════════════════════════
-       DESTINATION TEMPLATE SECTIONS (below)
-       ═══════════════════════════════════════════════════════ -->
-
-    <!-- ── 7. Analytics Charts (from destination) ─────────── -->
+    <!-- ── 7. Analytics Charts ─────────────────────────────── -->
     <div class="section-card" id="section-analytics">
       <div class="section-header">
         <div class="icon chart">📊</div>
@@ -266,52 +257,23 @@
       </div>
     </div>
 
-    <!-- ── 8. Database Reference (from destination) ───────── -->
+    <!-- ── 8. Database Reference ───────────────────────────── -->
     <div class="section-card" id="section-database">
       <div class="section-header">
         <div class="icon database">🗄️</div>
         <h2>Database</h2>
       </div>
       <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
-        The main habit data is stored locally in your browser. It follows the source template's structure:
-        <strong>one row per day</strong> with 10 habit columns (Yes/No checkboxes), a computed progress bar,
-        notes, and month grouping. Data persists via localStorage.
+        This tracker reads and writes directly to your Notion database via a local backend.
+        One row per day, with a checkbox column per habit, a computed progress value, notes,
+        and status. Nothing is cached in the browser — refresh at any time to see the latest
+        state of your Notion data.
       </p>
-    </div>
-
-    <!-- ── 9. Setup Guide (from destination) ──────────────── -->
-    <div class="section-card setup-guide" id="section-setup">
-      <h3>💡 Start Here: Set Up the Template</h3>
-
-      <div class="setup-step">
-        <h4>1️⃣ Connect your database to analytics (charts)</h4>
-        <p>To make the charts work with <strong>your own data</strong>, follow this guide:</p>
-        <p>👉 <a href="https://notionstats.com/blog/guide-to-adding-analytics-to-your-notion" target="_blank"
-            rel="noopener">Guide on adding custom charts</a></p>
-        <ul>
-          <li>Connect your Database</li>
-          <li>Create charts based on your data</li>
-        </ul>
-      </div>
-
-      <div class="setup-step">
-        <h4>2️⃣ Replace the existing chart embeds</h4>
-        <p>After creating your charts:</p>
-        <ul>
-          <li>Copy the <strong>embed links</strong> from NotionStats</li>
-          <li>Replace the existing chart embeds in this template with your new links</li>
-        </ul>
-      </div>
     </div>
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>Merged Habit Tracker — Source + Analytics Templates</p>
-      <p style="margin-top: var(--space-xs);">
-        <a href="javascript:void(0)" onclick="resetData()"
-          style="color: var(--text-muted); text-decoration: underline; cursor: pointer; font-size: 0.7rem;">Reset all
-          data</a>
-      </p>
+      <p>Habit Tracker — Live Notion Sync</p>
     </footer>
 
   </div>

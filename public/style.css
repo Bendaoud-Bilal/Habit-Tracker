@@ -5,9 +5,7 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-/* ── CSS Custom Properties ─────────────────────────────────── */
 :root {
-  /* Surfaces */
   --bg-primary: #0f0f13;
   --bg-secondary: #16161d;
   --bg-card: rgba(26, 26, 36, 0.75);
@@ -15,13 +13,11 @@
   --bg-glass: rgba(255, 255, 255, 0.03);
   --bg-glass-border: rgba(255, 255, 255, 0.06);
 
-  /* Text */
   --text-primary: #e8e8ed;
   --text-secondary: #9898a6;
   --text-muted: #5c5c6e;
   --text-accent: #a78bfa;
 
-  /* Accent palette */
   --accent-purple: #a78bfa;
   --accent-purple-glow: rgba(167, 139, 250, 0.15);
   --accent-blue: #60a5fa;
@@ -30,7 +26,6 @@
   --accent-orange: #fb923c;
   --accent-yellow: #fbbf24;
 
-  /* Heat map colors */
   --heat-0: #1e1e2a;
   --heat-red: #ef4444;
   --heat-orange: #f97316;
@@ -38,17 +33,14 @@
   --heat-blue: #3b82f6;
   --heat-green: #22c55e;
 
-  /* Progress bar */
   --progress-bg: rgba(255, 255, 255, 0.05);
   --progress-fill: linear-gradient(90deg, #a78bfa 0%, #60a5fa 50%, #34d399 100%);
 
-  /* Borders & Shadows */
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-medium: rgba(255, 255, 255, 0.1);
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
   --shadow-glow: 0 0 30px rgba(167, 139, 250, 0.08);
 
-  /* Spacing */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 16px;
@@ -56,19 +48,16 @@
   --space-xl: 32px;
   --space-2xl: 48px;
 
-  /* Radius */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 20px;
 
-  /* Transitions */
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ── Reset & Base ──────────────────────────────────────────── */
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -90,7 +79,6 @@ body {
   overflow-x: hidden;
 }
 
-/* Ambient background glow */
 body::before {
   content: '';
   position: fixed;
@@ -104,7 +92,6 @@ body::before {
   z-index: 0;
 }
 
-/* ── Layout ────────────────────────────────────────────────── */
 .app-container {
   position: relative;
   z-index: 1;
@@ -113,7 +100,6 @@ body::before {
   padding: var(--space-lg) var(--space-md);
 }
 
-/* ── App Header (Replaces Banner) ───────────────────────────── */
 .app-header {
   display: flex;
   align-items: center;
@@ -141,7 +127,6 @@ body::before {
   letter-spacing: -0.02em;
 }
 
-/* ── Section Cards (Glassmorphism) ─────────────────────────── */
 .section-card {
   background: var(--bg-card);
   backdrop-filter: blur(20px);
@@ -161,17 +146,10 @@ body::before {
 }
 
 @keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-/* Stagger animation for cards */
 .section-card:nth-child(1) { animation-delay: 0.05s; }
 .section-card:nth-child(2) { animation-delay: 0.1s; }
 .section-card:nth-child(3) { animation-delay: 0.15s; }
@@ -183,7 +161,6 @@ body::before {
 .section-card:nth-child(9) { animation-delay: 0.45s; }
 .section-card:nth-child(10) { animation-delay: 0.5s; }
 
-/* ── Section Headers ───────────────────────────────────────── */
 .section-header {
   display: flex;
   align-items: center;
@@ -217,7 +194,6 @@ body::before {
   letter-spacing: -0.01em;
 }
 
-/* ── Month Navigator ───────────────────────────────────────── */
 .month-nav {
   display: flex;
   align-items: center;
@@ -255,7 +231,6 @@ body::before {
   text-align: center;
 }
 
-/* ── Widget Embed ──────────────────────────────────────────── */
 .widget-embed {
   width: 100%;
   border-radius: var(--radius-md);
@@ -271,7 +246,6 @@ body::before {
   border: none;
 }
 
-/* ── Habit List ────────────────────────────────────────────── */
 .habit-list-container {
   display: flex;
   flex-direction: column;
@@ -297,45 +271,6 @@ body::before {
   border-radius: var(--radius-sm);
   white-space: nowrap;
   border: 1px solid var(--border-subtle);
-}
-
-/* Add Habit Form */
-.add-habit-form {
-  display: flex;
-  gap: var(--space-sm);
-}
-
-.add-habit-form input,
-.add-habit-form select {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-medium);
-  color: var(--text-primary);
-  font-size: 0.8rem;
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  outline: none;
-  transition: border-color var(--transition-fast);
-}
-
-.add-habit-form input:focus,
-.add-habit-form select:focus {
-  border-color: var(--accent-purple);
-}
-
-.add-habit-form .btn-primary {
-  background: var(--accent-purple);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 6px 16px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-
-.add-habit-form .btn-primary:hover {
-  background: #9061f9;
 }
 
 .habit-list-grid {
@@ -368,35 +303,6 @@ body::before {
   font-size: 1rem;
 }
 
-.habit-actions {
-  display: flex;
-  gap: var(--space-xs);
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-  margin-left: var(--space-sm);
-}
-
-.habit-list-item:hover .habit-actions {
-  opacity: 1;
-}
-
-.icon-btn {
-  background: transparent;
-  border: none;
-  font-size: 0.8rem;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  transition: background var(--transition-fast);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.icon-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
 .habit-badge {
   margin-left: auto;
   font-size: 0.65rem;
@@ -409,7 +315,6 @@ body::before {
 .habit-badge.high { background: rgba(167, 139, 250, 0.2); color: var(--accent-purple); }
 .habit-badge.low { background: rgba(96, 165, 250, 0.2); color: var(--accent-blue); }
 
-/* ── Tables (Week/Month Overview) ──────────────────────────── */
 .table-wrapper {
   overflow-x: auto;
   border-radius: var(--radius-md);
@@ -471,7 +376,6 @@ body::before {
   background: rgba(167, 139, 250, 0.04);
 }
 
-/* Checkbox cells */
 .habit-checkbox {
   appearance: none;
   -webkit-appearance: none;
@@ -506,7 +410,11 @@ body::before {
   font-weight: 700;
 }
 
-/* Progress bar in table */
+.habit-checkbox:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .progress-cell {
   min-width: 130px;
 }
@@ -540,7 +448,6 @@ body::before {
   text-align: right;
 }
 
-/* Status badges */
 .daily-status {
   font-size: 0.75rem;
   padding: 2px 8px;
@@ -556,7 +463,6 @@ body::before {
 .status-great { background: rgba(34, 197, 94, 0.12); color: var(--heat-green); }
 .status-perfect { background: rgba(167, 139, 250, 0.12); color: var(--accent-purple); }
 
-/* Notes cell */
 .notes-cell {
   max-width: 160px;
   overflow: hidden;
@@ -586,7 +492,6 @@ body::before {
   background: rgba(167, 139, 250, 0.05);
 }
 
-/* ── Heat Map ──────────────────────────────────────────────── */
 .heatmap-container {
   padding: var(--space-sm) 0;
 }
@@ -681,7 +586,6 @@ body::before {
 .heatmap-cell.level-4 { background: var(--heat-blue); }
 .heatmap-cell.level-5 { background: var(--heat-green); }
 
-/* Tooltip */
 .heatmap-cell[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
@@ -706,7 +610,6 @@ body::before {
   opacity: 1;
 }
 
-/* ── Streak Milestones ─────────────────────────────────────── */
 .milestones-grid {
   display: grid;
   gap: var(--space-sm);
@@ -786,7 +689,6 @@ body::before {
   margin-bottom: var(--space-xs);
 }
 
-/* Streak counter */
 .streak-counter {
   display: flex;
   align-items: center;
@@ -837,7 +739,6 @@ body::before {
   color: var(--accent-purple);
 }
 
-/* ── How It Works ──────────────────────────────────────────── */
 .how-it-works dl {
   display: grid;
   gap: var(--space-md);
@@ -903,7 +804,6 @@ body::before {
   flex-shrink: 0;
 }
 
-/* ── Template Divider ──────────────────────────────────────── */
 .template-divider {
   display: flex;
   align-items: center;
@@ -924,7 +824,6 @@ body::before {
   background: linear-gradient(90deg, transparent, var(--border-medium), transparent);
 }
 
-/* ── Analytics Section (Destination) ───────────────────────── */
 .chart-container {
   background: var(--bg-glass);
   border: 1px solid var(--border-medium);
@@ -944,7 +843,6 @@ body::before {
   gap: var(--space-md);
 }
 
-/* ── Setup Guide (Destination) ─────────────────────────────── */
 .setup-guide {
   background: linear-gradient(135deg, rgba(167, 139, 250, 0.06), rgba(96, 165, 250, 0.04));
   border: 1px solid rgba(167, 139, 250, 0.12);
@@ -960,53 +858,6 @@ body::before {
   gap: var(--space-sm);
 }
 
-.setup-step {
-  margin-bottom: var(--space-md);
-}
-
-.setup-step h4 {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--accent-purple);
-  margin-bottom: var(--space-xs);
-}
-
-.setup-step p, .setup-step li {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
-
-.setup-step ul {
-  list-style: none;
-  padding: 0;
-  margin-top: var(--space-xs);
-}
-
-.setup-step li {
-  padding: var(--space-xs) 0;
-  display: flex;
-  gap: var(--space-sm);
-}
-
-.setup-step li::before {
-  content: '•';
-  color: var(--accent-purple);
-}
-
-.setup-step a {
-  color: var(--accent-blue);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--transition-fast);
-}
-
-.setup-step a:hover {
-  color: var(--accent-purple);
-  text-decoration: underline;
-}
-
-/* ── Footer ────────────────────────────────────────────────── */
 .app-footer {
   text-align: center;
   padding: var(--space-2xl) 0 var(--space-lg);
@@ -1014,53 +865,25 @@ body::before {
   font-size: 0.75rem;
 }
 
-/* ── Responsive ────────────────────────────────────────────── */
+/* ── Sync status banner ────────────────────────────────────── */
+#sync-status.error { border-color: rgba(239, 68, 68, 0.4); }
+#sync-status.error #sync-status-text { color: var(--heat-red); }
+#sync-status.ok { border-color: rgba(52, 211, 153, 0.3); }
+#sync-status.ok #sync-status-text { color: var(--accent-green); }
+
 @media (max-width: 768px) {
-  .app-container {
-    padding: var(--space-md) var(--space-sm);
-  }
-
-  .section-card {
-    padding: var(--space-md);
-  }
-
-  .habit-list-container {
-    flex-direction: column;
-  }
-
-  .habit-list-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .milestone-row {
-    grid-template-columns: 1fr;
-    gap: var(--space-xs);
-  }
-
-  .milestone-header {
-    display: none;
-  }
-
-  .milestone-reward {
-    font-size: 0.72rem;
-  }
-
-  .heatmap-cell {
-    min-height: 18px;
-  }
-
-  .charts-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .month-nav .month-label {
-    font-size: 0.9rem;
-    min-width: 120px;
-  }
+  .app-container { padding: var(--space-md) var(--space-sm); }
+  .section-card { padding: var(--space-md); }
+  .habit-list-container { flex-direction: column; }
+  .habit-list-grid { grid-template-columns: repeat(2, 1fr); }
+  .milestone-row { grid-template-columns: 1fr; gap: var(--space-xs); }
+  .milestone-header { display: none; }
+  .milestone-reward { font-size: 0.72rem; }
+  .heatmap-cell { min-height: 18px; }
+  .charts-grid { grid-template-columns: 1fr; }
+  .month-nav .month-label { font-size: 0.9rem; min-width: 120px; }
 }
 
 @media (max-width: 480px) {
-  .habit-list-grid {
-    grid-template-columns: 1fr;
-  }
+  .habit-list-grid { grid-template-columns: 1fr; }
 }
