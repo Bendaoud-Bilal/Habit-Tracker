@@ -1,27 +1,23 @@
 /* ============================================================
-   HABIT TRACKER — APPLICATION LOGIC (Live Notion Sync)
+   HABIT TRACKER — APPLICATION LOGIC (Offline-First + Notion Sync)
    ------------------------------------------------------------
-   Difference from the original localStorage version:
-   - No localStorage read/write anywhere. On load, state comes
-     from GET /api/data (which the backend fills from Notion).
-   - Every checkbox toggle POSTs to /api/toggle, which writes the
-     change straight to the corresponding Notion page.
-   - Every notes edit POSTs to /api/notes.
-   - Habit add/edit/delete UI is removed: habit columns are
-     managed in Notion directly (adding a checkbox property there
-     is the equivalent of the old "Add Habit" form), so the
-     backend's schema detection just picks them up automatically
-     on next load.
-   - Notion has no native "habit weight" concept (checkbox
-     properties don't carry a numeric weight), so weights default
-     to 1 for every habit here. If you want weighted habits back,
-     the cleanest option is a small local weights.json the server
-     merges in by habit name — ask if you'd like that added.
+   Architecture:
+   - localStorage is the source of truth for the UI. All reads and
+     writes go through local state first (instant, works offline).
+   - Notion is an eventually-consistent mirror. When online, changes
+     are synced to Notion via the Express backend in the background.
+   - A sync queue (pendingChanges) tracks unsynced local writes. The
+     queue flushes automatically on reconnect and periodically.
+   - Custom modal/toast system replaces native confirm()/alert()
+     so the UI works inside Notion embed iframes (which suppress
+     native dialogs).
    ============================================================ */
 
 (function () {
   'use strict';
 
+  // ── Constants ───────────────────────────────────────────────
+  const STORAGE_KEY = 'habitTrackerOffline';
   const HABIT_EMOJIS = ['💤', '😌', '📱', '✍️', '💧', '💻', '💪', '📖', '🚶', '📋', '✨', '🔥', '🚀', '🧠', '🌿'];
   const MONTHS = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -29,9 +25,6 @@
   ];
   const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  // Hardcoded milestone ladder — same as the old data/streaks.json
-  // seed. This is UI-only configuration (not user data), so it's
-  // fine to keep it static rather than round-tripping through Notion.
   const STREAK_MILESTONES = [
     { name: 'First Streak', targetDays: 20, reward: '🎯 Amazing start! You\'ve built a solid foundation.' },
     { name: 'Consistency Master', targetDays: 30, reward: '🔥 One month strong! You\'re unstoppable.' },
@@ -42,24 +35,475 @@
     { name: 'Century Club', targetDays: 100, reward: '🏆 100+ Days! Absolute legend status!' },
   ];
 
+  const SYNC_RETRY_INTERVAL = 60_000; // 60s periodic retry
+
+  // ── State ───────────────────────────────────────────────────
   let state = {
-    habits: [],           // { name: string, weight: number } — weight always 1, see note above
-    entries: {},           // key: 'YYYY-MM-DD' → { habits: [bool×N], notes: string }
+    habits: [],            // { name: string, weight: number }
+    entries: {},           // key: 'YYYY-MM-DD' → { habits: [bool×N], notes: string, lastEditedTime: string|null }
     currentMonth: new Date().getMonth(),
     currentYear: new Date().getFullYear(),
+    pendingChanges: [],    // sync queue: { id, type, date, habitIndex?, checked?, notes?, clientTimestamp, status }
+    lastSyncedAt: null,    // ISO timestamp of last successful full pull from Notion
+    conflictLog: [],       // { date, field, localValue, remoteValue, resolution, resolvedAt }
   };
 
   let charts = { trend: null, donut: null, bar: null };
   let loaded = false;
-  let pendingToggles = 0;
   let editingHabitIdx = null;
+  let flushing = false;
+  let syncRetryTimer = null;
 
+  // ── Initialization ──────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', async () => {
-    await loadData();
-    setupListeners();
+    // Register service worker for PWA / offline app-shell caching
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(err =>
+        console.warn('SW registration failed:', err)
+      );
+    }
+
+    // Load local data first (instant render), then sync remote
+    loadLocal();
     renderAll();
+    setupListeners();
+
+    // Background sync: fetch latest from Notion
+    await syncFromRemote();
+
+    // Set up connectivity listeners and periodic retry
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    syncRetryTimer = setInterval(() => {
+      if (navigator.onLine && state.pendingChanges.length > 0) {
+        flushPendingChanges();
+      }
+    }, SYNC_RETRY_INTERVAL);
   });
 
+  // ── Custom Modal (replaces native confirm/alert) ────────────
+  /**
+   * Shows a glassmorphism modal in the DOM. Works inside Notion
+   * embed iframes where native confirm()/alert() are suppressed.
+   *
+   * @param {Object} opts - { icon?, title, body, buttons: [{ label, value, className? }] }
+   * @returns {Promise<string>} The `value` of the button clicked
+   */
+  function showModal({ icon, title, body, buttons }) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'custom-modal-overlay';
+      overlay.innerHTML = `
+        <div class="custom-modal">
+          ${icon ? `<span class="custom-modal-icon">${icon}</span>` : ''}
+          <div class="custom-modal-title">${title}</div>
+          <div class="custom-modal-body">${body}</div>
+          <div class="custom-modal-actions">
+            ${buttons.map(b =>
+              `<button class="custom-modal-btn ${b.className || ''}" data-value="${b.value}">${b.label}</button>`
+            ).join('')}
+          </div>
+        </div>
+      `;
+
+      overlay.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-value]');
+        if (btn) {
+          overlay.classList.remove('visible');
+          setTimeout(() => { overlay.remove(); resolve(btn.dataset.value); }, 200);
+        }
+      });
+
+      // Close on overlay background click (outside modal)
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) {
+          overlay.classList.remove('visible');
+          setTimeout(() => { overlay.remove(); resolve('cancel'); }, 200);
+        }
+      });
+
+      document.body.appendChild(overlay);
+      requestAnimationFrame(() => overlay.classList.add('visible'));
+    });
+  }
+
+  // ── Toast Notifications ─────────────────────────────────────
+  const TOAST_ICONS = {
+    info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', conflict: '⚡'
+  };
+
+  function showToast(message, type = 'info', duration = 4000) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+      <span class="toast-icon">${TOAST_ICONS[type] || 'ℹ️'}</span>
+      <span class="toast-msg">${message}</span>
+      <button class="toast-dismiss" aria-label="Dismiss">×</button>
+    `;
+
+    toast.querySelector('.toast-dismiss').addEventListener('click', () => {
+      toast.classList.remove('visible');
+      setTimeout(() => toast.remove(), 250);
+    });
+
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('visible'));
+
+    if (duration > 0) {
+      setTimeout(() => {
+        if (toast.parentNode) {
+          toast.classList.remove('visible');
+          setTimeout(() => toast.remove(), 250);
+        }
+      }, duration);
+    }
+  }
+
+  // ── LocalStorage (persistence layer) ────────────────────────
+  function save() {
+    try {
+      const toSave = {
+        habits: state.habits,
+        entries: state.entries,
+        pendingChanges: state.pendingChanges,
+        lastSyncedAt: state.lastSyncedAt,
+        conflictLog: state.conflictLog,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    } catch (err) {
+      console.error('Failed to save to localStorage:', err);
+    }
+  }
+
+  function loadLocal() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed.habits) state.habits = parsed.habits;
+      if (parsed.entries) state.entries = parsed.entries;
+      if (parsed.pendingChanges) state.pendingChanges = parsed.pendingChanges;
+      if (parsed.lastSyncedAt) state.lastSyncedAt = parsed.lastSyncedAt;
+      if (parsed.conflictLog) state.conflictLog = parsed.conflictLog;
+      loaded = state.habits.length > 0;
+      if (loaded) {
+        setSyncStatus(
+          `Loaded from cache${state.lastSyncedAt ? ` · last synced ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
+          'ok'
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load from localStorage:', err);
+    }
+  }
+
+  // ── Remote Sync (Notion via backend) ────────────────────────
+  async function syncFromRemote() {
+    if (!navigator.onLine) {
+      setSyncStatus(
+        `Offline — showing cached data${state.lastSyncedAt ? ` from ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
+        'offline'
+      );
+      renderSyncBadge();
+      return;
+    }
+
+    setSyncStatus('Syncing with Notion…', null);
+    try {
+      const res = await fetch('/api/data');
+      if (!res.ok) {
+        const body = await safeJson(res);
+        throw new Error((body && body.error) || `Request failed (${res.status})`);
+      }
+      const data = await res.json();
+
+      const remoteHabits = data.habitNames.map((name, i) => ({
+        name,
+        weight: (data.habitWeights && typeof data.habitWeights[i] === 'number') ? data.habitWeights[i] : 1,
+      }));
+
+      const remoteEntries = {};
+      for (const e of data.entries) {
+        remoteEntries[e.date] = {
+          habits: e.habits,
+          notes: e.notes || '',
+          lastEditedTime: e.lastEditedTime || null,
+        };
+      }
+
+      // Merge remote data with local state (handles conflicts)
+      mergeRemoteData(remoteHabits, remoteEntries);
+
+      state.lastSyncedAt = new Date().toISOString();
+      loaded = true;
+      save();
+      renderAll();
+
+      const pendingCount = state.pendingChanges.length;
+      if (pendingCount > 0) {
+        setSyncStatus(`Synced with Notion · ${pendingCount} local change(s) pending`, 'warning');
+        // Flush pending changes now that we're online
+        flushPendingChanges();
+      } else {
+        setSyncStatus(`Synced with Notion · ${data.entries.length} day(s) loaded`, 'ok');
+      }
+    } catch (err) {
+      console.error('Failed to sync from Notion:', err);
+      if (loaded) {
+        setSyncStatus(
+          `Couldn't reach Notion — showing cached data${state.lastSyncedAt ? ` from ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
+          'warning'
+        );
+      } else {
+        setSyncStatus(`Couldn't reach Notion: ${err.message}`, 'error');
+      }
+    }
+    renderSyncBadge();
+  }
+
+  // ── Merge Remote Data + Conflict Detection (Phase 4) ────────
+  function mergeRemoteData(remoteHabits, remoteEntries) {
+    // Always take the latest habit list from Notion (schema is authoritative)
+    state.habits = remoteHabits;
+
+    // Build a set of dates with pending local changes
+    const pendingDates = new Map();
+    for (const change of state.pendingChanges) {
+      if (!pendingDates.has(change.date)) {
+        pendingDates.set(change.date, []);
+      }
+      pendingDates.get(change.date).push(change);
+    }
+
+    // Merge entries
+    for (const [date, remote] of Object.entries(remoteEntries)) {
+      const local = state.entries[date];
+
+      if (!pendingDates.has(date)) {
+        // No pending local changes for this date — take remote as-is
+        state.entries[date] = remote;
+        continue;
+      }
+
+      // This date has pending local changes — check for conflicts
+      const localLastEdited = local && local.lastEditedTime;
+      const remoteLastEdited = remote.lastEditedTime;
+
+      if (!localLastEdited || !remoteLastEdited) {
+        // Can't compare timestamps — local changes win (they're queued to sync)
+        // Keep local state, just update lastEditedTime for future comparisons
+        if (local) {
+          state.entries[date] = { ...local, lastEditedTime: remoteLastEdited };
+        }
+        continue;
+      }
+
+      // Compare: has the remote entry been edited since we last synced?
+      const localChanges = pendingDates.get(date);
+      const remoteEditTime = new Date(remoteLastEdited).getTime();
+      const lastSyncTime = state.lastSyncedAt ? new Date(state.lastSyncedAt).getTime() : 0;
+
+      if (remoteEditTime <= lastSyncTime) {
+        // Remote hasn't changed since our last sync — local wins, no conflict
+        if (local) {
+          state.entries[date] = { ...local, lastEditedTime: remoteLastEdited };
+        }
+        continue;
+      }
+
+      // Remote HAS changed independently — conflict!
+      // Apply per-field last-write-wins
+      for (const change of localChanges) {
+        const clientTime = new Date(change.clientTimestamp).getTime();
+
+        if (change.type === 'toggle') {
+          if (clientTime >= remoteEditTime) {
+            // Local toggle is newer — keep local value (will overwrite remote on flush)
+            // No action needed, local state already has this
+          } else {
+            // Remote is newer — drop this pending change, adopt remote
+            state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
+            state.conflictLog.push({
+              date,
+              field: `habits[${change.habitIndex}]`,
+              localValue: change.checked,
+              remoteValue: remote.habits[change.habitIndex],
+              resolution: 'remote-won',
+              resolvedAt: new Date().toISOString(),
+            });
+          }
+        } else if (change.type === 'notes') {
+          if (clientTime >= remoteEditTime) {
+            // Local notes are newer — keep local
+          } else {
+            // Remote is newer — drop local pending change
+            state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
+            state.conflictLog.push({
+              date,
+              field: 'notes',
+              localValue: change.notes,
+              remoteValue: remote.notes,
+              resolution: 'remote-won',
+              resolvedAt: new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      // After conflict resolution, build the merged entry:
+      // Start from remote, then re-apply any surviving local changes
+      const merged = { ...remote };
+      const survivingChanges = state.pendingChanges.filter(c => c.date === date);
+      for (const change of survivingChanges) {
+        if (change.type === 'toggle') {
+          merged.habits = [...merged.habits];
+          merged.habits[change.habitIndex] = change.checked;
+        } else if (change.type === 'notes') {
+          merged.notes = change.notes;
+        }
+      }
+      state.entries[date] = merged;
+    }
+
+    // Add any local-only dates not in remote (rare, but possible if
+    // a new day started while offline and user toggled habits)
+    for (const date of Object.keys(state.entries)) {
+      if (!remoteEntries[date]) {
+        // Keep local-only entry as-is
+      }
+    }
+
+    // Surface conflicts if any were resolved
+    const recentConflicts = state.conflictLog.filter(c => {
+      const age = Date.now() - new Date(c.resolvedAt).getTime();
+      return age < 60_000; // Show conflicts from the last minute
+    });
+    if (recentConflicts.length > 0) {
+      showToast(
+        `${recentConflicts.length} conflict(s) resolved — remote changes were newer`,
+        'conflict',
+        6000
+      );
+      renderConflictBanner();
+    }
+
+    // Trim old conflict log entries (keep last 50)
+    if (state.conflictLog.length > 50) {
+      state.conflictLog = state.conflictLog.slice(-50);
+    }
+  }
+
+  // ── Sync Queue — Flush pending changes to Notion ────────────
+  async function flushPendingChanges() {
+    if (flushing || !navigator.onLine || state.pendingChanges.length === 0) return;
+    flushing = true;
+
+    // Collapse redundant entries before flushing
+    state.pendingChanges = collapseQueue(state.pendingChanges);
+    save();
+
+    const queue = [...state.pendingChanges];
+
+    for (const change of queue) {
+      change.status = 'syncing';
+      save();
+
+      try {
+        if (change.type === 'toggle') {
+          await postToggle(change);
+        } else if (change.type === 'notes') {
+          await postNotes(change);
+        }
+        // Success: remove from queue
+        state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
+        save();
+      } catch (err) {
+        console.error('Sync failed for change:', change.id, err);
+        change.status = 'failed';
+        save();
+        // Stop on first failure — likely offline again
+        break;
+      }
+    }
+
+    flushing = false;
+    renderSyncBadge();
+
+    if (state.pendingChanges.length === 0) {
+      setSyncStatus('Synced with Notion', 'ok');
+      showToast('All changes synced to Notion', 'success', 3000);
+    } else {
+      setSyncStatus(`${state.pendingChanges.length} change(s) waiting to sync`, 'warning');
+    }
+  }
+
+  function collapseQueue(queue) {
+    const latestByKey = new Map();
+    for (const change of queue) {
+      const key = change.type === 'toggle'
+        ? `toggle:${change.date}:${change.habitIndex}`
+        : `notes:${change.date}`;
+      latestByKey.set(key, change);
+    }
+    return [...latestByKey.values()];
+  }
+
+  async function postToggle(change) {
+    const entry = getEntry(change.date);
+    const weights = state.habits.map(h => h.weight || 1);
+    const res = await fetch('/api/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        date: change.date,
+        habitIndex: change.habitIndex,
+        checked: change.checked,
+        weights,
+        habitsAfterToggle: entry.habits,
+      }),
+    });
+    if (!res.ok) {
+      const body = await safeJson(res);
+      throw new Error((body && body.error) || `Request failed (${res.status})`);
+    }
+  }
+
+  async function postNotes(change) {
+    const res = await fetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: change.date, notes: change.notes }),
+    });
+    if (!res.ok) {
+      const body = await safeJson(res);
+      throw new Error((body && body.error) || `Request failed (${res.status})`);
+    }
+  }
+
+  // ── Connectivity Listeners ──────────────────────────────────
+  function onOnline() {
+    showToast('Back online — syncing changes…', 'success', 3000);
+    setSyncStatus('Back online — syncing…', null);
+    flushPendingChanges().then(() => syncFromRemote());
+  }
+
+  function onOffline() {
+    setSyncStatus('Offline — changes will sync when you reconnect', 'offline');
+    showToast('You\'re offline — changes are saved locally', 'warning', 4000);
+    renderSyncBadge();
+  }
+
+  // ── Generate a UUID for sync queue entries ──────────────────
+  function generateId() {
+    return 'xxxx-xxxx-xxxx'.replace(/x/g, () =>
+      Math.floor(Math.random() * 16).toString(16)
+    );
+  }
+
+  // ── Setup Listeners ─────────────────────────────────────────
   function setupListeners() {
     const form = document.getElementById('add-habit-form');
     if (!form) return;
@@ -85,6 +529,7 @@
           if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to update habit.');
           editingHabitIdx = null;
           btn.textContent = 'Add';
+          showToast(`Habit "${name}" updated`, 'success', 3000);
         } else {
           const res = await fetch('/api/habits', {
             method: 'POST',
@@ -92,14 +537,16 @@
             body: JSON.stringify({ name, weight }),
           });
           if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to add habit.');
+          showToast(`Habit "${name}" added`, 'success', 3000);
         }
         nameInput.value = '';
         impInput.value = '1';
         setSyncStatus('Reloading from Notion…', null);
-        await loadData();
+        await syncFromRemote();
         renderAll();
       } catch (err) {
         console.error(err);
+        showToast(`Couldn't save habit: ${err.message}`, 'error', 5000);
         setSyncStatus(`Couldn't save habit: ${err.message}`, 'error');
       } finally {
         btn.disabled = false;
@@ -118,9 +565,20 @@
 
   window.deleteHabit = async function (idx) {
     const h = state.habits[idx];
-    if (!confirm(`Delete "${h.name}"? This removes the column and ALL historical data for it in Notion — this cannot be undone.`)) {
-      return;
-    }
+
+    // Custom modal instead of native confirm() — works in Notion iframes
+    const result = await showModal({
+      icon: '🗑️',
+      title: `Delete "${h.name}"?`,
+      body: 'This removes the column and <strong>ALL historical data</strong> for it in Notion — this cannot be undone.',
+      buttons: [
+        { label: 'Cancel', value: 'cancel' },
+        { label: 'Delete', value: 'delete', className: 'danger' },
+      ],
+    });
+
+    if (result !== 'delete') return;
+
     try {
       setSyncStatus('Deleting habit in Notion…', null);
       const res = await fetch(`/api/habits/${encodeURIComponent(h.name)}`, { method: 'DELETE' });
@@ -130,72 +588,95 @@
         document.getElementById('add-habit-btn').textContent = 'Add';
         document.getElementById('new-habit-name').value = '';
       }
-      await loadData();
+      showToast(`Habit "${h.name}" deleted`, 'success', 3000);
+      await syncFromRemote();
       renderAll();
     } catch (err) {
       console.error(err);
+      showToast(`Couldn't delete habit: ${err.message}`, 'error', 5000);
       setSyncStatus(`Couldn't delete habit: ${err.message}`, 'error');
     }
   };
 
-  // ── Data Loading (Notion via backend) ─────────────────────
-  async function loadData() {
-    setSyncStatus('Loading from Notion…', null);
-    try {
-      const res = await fetch('/api/data');
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error((body && body.error) || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-
-      state.habits = data.habitNames.map((name, i) => ({
-        name,
-        weight: (data.habitWeights && typeof data.habitWeights[i] === 'number') ? data.habitWeights[i] : 1,
-      }));
-      state.entries = {};
-      for (const e of data.entries) {
-        state.entries[e.date] = { habits: e.habits, notes: e.notes || '' };
-      }
-
-      loaded = true;
-      setSyncStatus(`Synced with Notion · ${data.entries.length} day(s) loaded`, 'ok');
-    } catch (err) {
-      console.error('Failed to load data from Notion:', err);
-      loaded = false;
-      state.habits = [];
-      state.entries = {};
-      setSyncStatus(
-        `Couldn't reach Notion: ${err.message}. Check that the server is running and .env is configured, then refresh.`,
-        'error'
-      );
-    }
-  }
-
+  // ── Sync Status Banner ──────────────────────────────────────
   function setSyncStatus(text, kind) {
     const banner = document.getElementById('sync-status');
     const textEl = document.getElementById('sync-status-text');
     if (!banner || !textEl) return;
     banner.style.display = 'block';
-    banner.classList.remove('ok', 'error');
+    banner.classList.remove('ok', 'error', 'warning', 'offline');
     if (kind) banner.classList.add(kind);
     textEl.textContent = text;
   }
 
+  function renderSyncBadge() {
+    const slot = document.getElementById('sync-badge');
+    if (!slot) return;
+
+    const count = state.pendingChanges.length;
+    if (count === 0) {
+      slot.innerHTML = '';
+      return;
+    }
+
+    slot.innerHTML = `
+      <span class="sync-badge">
+        <span class="pending-dot"></span>
+        <span class="pending-count">${count} pending</span>
+      </span>
+      <button class="sync-retry-btn" onclick="window._retrySync()">Retry now</button>
+    `;
+  }
+
+  window._retrySync = function () {
+    if (navigator.onLine) {
+      flushPendingChanges();
+    } else {
+      showToast('Still offline — will retry when connected', 'warning', 3000);
+    }
+  };
+
+  function renderConflictBanner() {
+    const slot = document.getElementById('conflict-banner-slot');
+    if (!slot) return;
+
+    const recent = state.conflictLog.filter(c => {
+      const age = Date.now() - new Date(c.resolvedAt).getTime();
+      return age < 300_000; // last 5 minutes
+    });
+
+    if (recent.length === 0) {
+      slot.innerHTML = '';
+      return;
+    }
+
+    slot.innerHTML = `
+      <div class="conflict-banner">
+        <span>⚡ ${recent.length} sync conflict(s) resolved (remote was newer)</span>
+        <button class="conflict-banner-dismiss" onclick="this.parentElement.remove()">×</button>
+      </div>
+    `;
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────
   async function safeJson(res) {
     try { return await res.json(); } catch (_) { return null; }
   }
 
-  // ── Helpers (unchanged math from the original app.js) ─────
   function dateKey(y, m, d) {
     return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   }
 
   function getEntry(key) {
     if (!state.entries[key]) {
-      state.entries[key] = { habits: new Array(state.habits.length).fill(false), notes: '' };
+      state.entries[key] = { habits: new Array(state.habits.length).fill(false), notes: '', lastEditedTime: null };
     }
-    return state.entries[key];
+    // Ensure habits array matches current habit count
+    const entry = state.entries[key];
+    while (entry.habits.length < state.habits.length) {
+      entry.habits.push(false);
+    }
+    return entry;
   }
 
   function calcPercent(habitsArr) {
@@ -253,6 +734,15 @@
     return dates;
   }
 
+  function formatTimeAgo(isoString) {
+    if (!isoString) return 'never';
+    const seconds = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+  }
+
   // ── Render All ──────────────────────────────────────────────
   function renderAll() {
     updateTableHeaders();
@@ -263,6 +753,7 @@
     renderHeatMap();
     renderStreakMilestones();
     updateAnalytics();
+    renderSyncBadge();
   }
 
   function updateTableHeaders() {
@@ -308,11 +799,10 @@
     if (label) label.textContent = `${MONTHS[state.currentMonth]} ${state.currentYear}`;
   }
 
-  // ── Overviews ───────────────────────────────────────────────
+  // ── Table Row Generation ────────────────────────────────────
   function generateTableRow(dKey, displayDate, isToday) {
     const entry = getEntry(dKey);
     const pct = calcPercent(entry.habits);
-    const disabledAttr = loaded ? '' : 'disabled';
 
     let html = `<tr class="${isToday ? 'today-row' : ''}">`;
     html += `<td style="${isToday ? 'color: var(--accent-purple); font-weight: 700;' : ''}">${displayDate}</td>`;
@@ -322,14 +812,14 @@
     </div></td>`;
 
     for (let h = 0; h < state.habits.length; h++) {
-      html += `<td><input type="checkbox" class="habit-checkbox" ${disabledAttr}
+      html += `<td><input type="checkbox" class="habit-checkbox"
         ${entry.habits[h] ? 'checked' : ''}
         data-date="${dKey}" data-habit="${h}"
         onchange="window.toggleHabit(this)"></td>`;
     }
 
     html += `<td><span class="daily-status ${getStatusClass(pct)}">${getStatusText(pct)}</span></td>`;
-    html += `<td><input type="text" class="notes-input" ${disabledAttr} value="${entry.notes.replace(/"/g, '&quot;')}"
+    html += `<td><input type="text" class="notes-input" value="${entry.notes.replace(/"/g, '&quot;')}"
       data-date="${dKey}" placeholder="—" onchange="window.updateNotes(this)"></td>`;
     html += '</tr>';
     return html;
@@ -362,7 +852,7 @@
     tbody.innerHTML = html;
   }
 
-  // ── Habit List (read-only — managed in Notion, not here) ──────
+  // ── Habit List ──────────────────────────────────────────────
   function renderHabitList() {
     const container = document.getElementById('habit-list-grid');
     if (!container) return;
@@ -534,61 +1024,39 @@
     }
   }
 
-  // ── Write-back to Notion (via backend) ─────────────────────
-  window.toggleHabit = async function (el) {
+  // ── Write-back: Toggle Habit (local-first) ──────────────────
+  window.toggleHabit = function (el) {
     const key = el.dataset.date;
     const habitIdx = parseInt(el.dataset.habit, 10);
     const entry = getEntry(key);
-    const previousValue = entry.habits[habitIdx];
     const nextValue = el.checked;
 
-    // Optimistic UI update — reflect the change immediately, then
-    // confirm with Notion. If the write fails, roll the checkbox
-    // back and surface why, rather than leaving the UI showing a
-    // state Notion doesn't actually have.
+    // Write to local state immediately
     entry.habits[habitIdx] = nextValue;
+    save();
+
+    // Update UI instantly (no network round-trip)
     updateRowDisplay(el, entry);
     renderHeatMap();
     renderStreakMilestones();
     updateAnalytics();
 
-    pendingToggles++;
-    setSyncStatus('Saving to Notion…', null);
-    el.disabled = true;
+    // Queue the change for remote sync
+    state.pendingChanges.push({
+      id: generateId(),
+      type: 'toggle',
+      date: key,
+      habitIndex: habitIdx,
+      checked: nextValue,
+      clientTimestamp: new Date().toISOString(),
+      status: 'pending',
+    });
+    save();
+    renderSyncBadge();
 
-    try {
-      const weights = state.habits.map(h => h.weight || 1);
-      const res = await fetch('/api/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          date: key,
-          habitIndex: habitIdx,
-          checked: nextValue,
-          weights,
-          habitsAfterToggle: entry.habits,
-        }),
-      });
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error((body && body.error) || `Request failed (${res.status})`);
-      }
-    } catch (err) {
-      console.error('Failed to save toggle to Notion:', err);
-      // Roll back
-      entry.habits[habitIdx] = previousValue;
-      el.checked = previousValue;
-      updateRowDisplay(el, entry);
-      renderHeatMap();
-      renderStreakMilestones();
-      updateAnalytics();
-      setSyncStatus(`Couldn't save to Notion: ${err.message}`, 'error');
-    } finally {
-      el.disabled = false;
-      pendingToggles--;
-      if (pendingToggles === 0 && !document.getElementById('sync-status').classList.contains('error')) {
-        setSyncStatus('Synced with Notion', 'ok');
-      }
+    // If online, kick off sync in the background
+    if (navigator.onLine) {
+      flushPendingChanges();
     }
   };
 
@@ -596,13 +1064,11 @@
     const dateKeyVal = el.dataset.date;
     const pct = calcPercent(entry.habits);
 
-    // Sync the checkbox itself across every table it appears in
-    // (week + month can both show the same date at once).
+    // Sync the checkbox across every table it appears in
     document.querySelectorAll(`input.habit-checkbox[data-date="${dateKeyVal}"][data-habit="${el.dataset.habit}"]`)
       .forEach(cb => { if (cb !== el) cb.checked = el.checked; });
 
-    // Sync progress/status on every row for this date, not just the
-    // row containing the checkbox that was clicked.
+    // Sync progress/status on every row for this date
     document.querySelectorAll(`tr`).forEach(tr => {
       const marker = tr.querySelector(`input.habit-checkbox[data-date="${dateKeyVal}"]`);
       if (!marker) return;
@@ -618,37 +1084,32 @@
     });
   }
 
-  window.updateNotes = async function (el) {
+  // ── Write-back: Update Notes (local-first) ──────────────────
+  window.updateNotes = function (el) {
     const key = el.dataset.date;
     const entry = getEntry(key);
-    const previousNotes = entry.notes;
     entry.notes = el.value;
+    save();
 
+    // Sync across tables
     document.querySelectorAll(`input.notes-input[data-date="${key}"]`)
       .forEach(input => { if (input !== el) input.value = el.value; });
 
-    el.disabled = true;
-    setSyncStatus('Saving notes to Notion…', null);
-    try {
-      const res = await fetch('/api/notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: key, notes: el.value }),
-      });
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error((body && body.error) || `Request failed (${res.status})`);
-      }
-      setSyncStatus('Synced with Notion', 'ok');
-    } catch (err) {
-      console.error('Failed to save notes to Notion:', err);
-      entry.notes = previousNotes;
-      el.value = previousNotes;
-      document.querySelectorAll(`input.notes-input[data-date="${key}"]`)
-        .forEach(input => { input.value = previousNotes; });
-      setSyncStatus(`Couldn't save notes: ${err.message}`, 'error');
-    } finally {
-      el.disabled = false;
+    // Queue for remote sync
+    state.pendingChanges.push({
+      id: generateId(),
+      type: 'notes',
+      date: key,
+      notes: el.value,
+      clientTimestamp: new Date().toISOString(),
+      status: 'pending',
+    });
+    save();
+    renderSyncBadge();
+
+    // If online, kick off sync
+    if (navigator.onLine) {
+      flushPendingChanges();
     }
   };
 

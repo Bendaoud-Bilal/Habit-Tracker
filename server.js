@@ -72,6 +72,7 @@ app.get('/api/data', async (req, res) => {
         date: e.date,
         habits: e.habits,
         notes: e.notes,
+        lastEditedTime: e.lastEditedTime || null,
       })),
     });
   } catch (err) {

@@ -168,6 +168,7 @@ async function fetchAllEntries() {
         date,
         habits,
         notes: extractNotesValue(page, notesProp),
+        lastEditedTime: page.last_edited_time || null,
       });
     }
 

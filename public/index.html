@@ -5,9 +5,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description"
-    content="Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Synced live with Notion.">
+    content="Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Synced live with Notion. Works offline.">
   <title>Habit Tracker — Live Notion Sync</title>
   <link rel="icon" type="image/png" href="assets/banner.png">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f0f13">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -25,6 +27,8 @@
     <!-- Sync status banner -->
     <div class="section-card" id="sync-status" style="display:none; padding: 10px 16px;">
       <span id="sync-status-text" style="font-size:0.8rem; color: var(--text-secondary);"></span>
+      <span id="sync-badge"></span>
+      <span id="conflict-banner-slot"></span>
     </div>
 
     <!-- Time Left Widget (from source) -->
@@ -228,7 +232,7 @@
           <ul>
             <li>To add/remove/rename habits — edit the checkbox columns directly in Notion</li>
             <li>Checking a box here writes straight back to your Notion database</li>
-            <li>Data is never stored in this browser — every load re-reads Notion live</li>
+            <li>Data is cached locally for offline use — changes sync to Notion when online</li>
           </ul>
         </div>
       </div>
@@ -264,10 +268,10 @@
         <h2>Database</h2>
       </div>
       <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
-        This tracker reads and writes directly to your Notion database via a local backend.
-        One row per day, with a checkbox column per habit, a computed progress value, notes,
-        and status. Nothing is cached in the browser — refresh at any time to see the latest
-        state of your Notion data.
+        This tracker reads and writes to your Notion database via a backend API.
+        Data is cached locally for instant loading and offline use — changes sync
+        automatically when you're online. One row per day, with a checkbox column
+        per habit, a computed progress value, notes, and status.
       </p>
     </div>
 
@@ -277,6 +281,9 @@
     </footer>
 
   </div>
+
+  <!-- Toast notification container -->
+  <div class="toast-container" id="toast-container"></div>
 
   <script src="app.js"></script>
 
