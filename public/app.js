@@ -1,520 +1,104 @@
 /* ============================================================
-   HABIT TRACKER — APPLICATION LOGIC (Offline-First + Notion Sync)
+   HABIT TRACKER — APPLICATION LOGIC (Live Notion Sync)
    ------------------------------------------------------------
-   Architecture:
-   - localStorage is the source of truth for the UI. All reads and
-     writes go through local state first (instant, works offline).
-   - Notion is an eventually-consistent mirror. When online, changes
-     are synced to Notion via the Express backend in the background.
-   - A sync queue (pendingChanges) tracks unsynced local writes. The
-     queue flushes automatically on reconnect and periodically.
-   - Custom modal/toast system replaces native confirm()/alert()
-     so the UI works inside Notion embed iframes (which suppress
-     native dialogs).
+   Difference from the original localStorage version:
+   - No localStorage read/write anywhere. On load, state comes
+     from GET /api/data (which the backend fills from Notion).
+   - Every checkbox toggle POSTs to /api/toggle, which writes the
+     change straight to the corresponding Notion page.
+   - Every notes edit POSTs to /api/notes.
+   - Habit add/edit/delete UI is removed: habit columns are
+     managed in Notion directly (adding a checkbox property there
+     is the equivalent of the old "Add Habit" form), so the
+     backend's schema detection just picks them up automatically
+     on next load.
+   - Notion has no native "habit weight" concept (checkbox
+     properties don't carry a numeric weight), so weights default
+     to 1 for every habit here, stored server-side in weights.json.
+   - Habit ICONS work the same way: Notion has no icon concept
+     either, so each habit's chosen OpenMoji icon is stored
+     server-side in emoji.json (see emoji-store.js), and every
+     habit must have a unique icon — enforced both here (picker
+     greys out already-used icons) and on the server (source of
+     truth; see server.js).
+   - Icons are rendered from the locally vendored OpenMoji PNGs at
+     public/assets/openmoji/<hexcode>.png rather than the raw
+     unicode emoji character, so the icon set looks the same for
+     every user regardless of OS/browser font — that's the whole
+     point of using OpenMoji instead of native emoji.
    ============================================================ */
 
 (function () {
   'use strict';
 
-  // ── Constants ───────────────────────────────────────────────
-  const STORAGE_KEY = 'habitTrackerOffline';
-  const HABIT_EMOJIS = ['💤', '😌', '📱', '✍️', '💧', '💻', '💪', '📖', '🚶', '📋', '✨', '🔥', '🚀', '🧠', '🌿'];
   const MONTHS = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
   const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  const STREAK_MILESTONES = [
-    { name: 'First Streak', targetDays: 20, reward: '🎯 Amazing start! You\'ve built a solid foundation.' },
-    { name: 'Consistency Master', targetDays: 30, reward: '🔥 One month strong! You\'re unstoppable.' },
-    { name: 'Habit Warrior', targetDays: 50, reward: '💪 50 days of excellence! You\'re a legend.' },
-    { name: 'Discipline Champion', targetDays: 60, reward: '⚡ 60 days! Nothing can stop you now.' },
-    { name: 'Elite Performer', targetDays: 75, reward: '👑 75 days! You\'re in the top 1%.' },
-    { name: 'Transformation Complete', targetDays: 90, reward: '💎 90 days! You\'ve transformed your life.' },
-    { name: 'Century Club', targetDays: 100, reward: '🏆 100+ Days! Absolute legend status!' },
-  ];
-
-  const SYNC_RETRY_INTERVAL = 60_000; // 60s periodic retry
+  const OPENMOJI_DIR = 'assets/openmoji';
+  const EMOJI_PAGE_SIZE = 24; // 6 cols x 4 rows — keeps the picker compact
 
   // ── State ───────────────────────────────────────────────────
   let state = {
-    habits: [],            // { name: string, weight: number }
-    entries: {},           // key: 'YYYY-MM-DD' → { habits: [bool×N], notes: string, lastEditedTime: string|null }
+    habits: [],           // { name: string, weight: number, hexcode: string, emoji: string }
+    entries: {},           // key: 'YYYY-MM-DD' → { habits: [bool×N], notes: string }
     currentMonth: new Date().getMonth(),
     currentYear: new Date().getFullYear(),
-    pendingChanges: [],    // sync queue: { id, type, date, habitIndex?, checked?, notes?, clientTimestamp, status }
-    lastSyncedAt: null,    // ISO timestamp of last successful full pull from Notion
-    conflictLog: [],       // { date, field, localValue, remoteValue, resolution, resolvedAt }
   };
 
   let charts = { trend: null, donut: null, bar: null };
   let loaded = false;
+  let pendingToggles = 0;
   let editingHabitIdx = null;
-  let flushing = false;
-  let syncRetryTimer = null;
 
-  // ── Initialization ──────────────────────────────────────────
+  // Full OpenMoji catalog for the picker: [{ hexcode, emoji, name, category }]
+  let emojiCatalog = [];
+
   document.addEventListener('DOMContentLoaded', async () => {
-    // Register service worker for PWA / offline app-shell caching
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(err =>
-        console.warn('SW registration failed:', err)
-      );
-    }
-
-    // Load local data first (instant render), then sync remote
-    loadLocal();
-    renderAll();
+    setupModal();
     setupListeners();
-
-    // Background sync: fetch latest from Notion
-    await syncFromRemote();
-
-    // Set up connectivity listeners and periodic retry
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    syncRetryTimer = setInterval(() => {
-      if (navigator.onLine && state.pendingChanges.length > 0) {
-        flushPendingChanges();
-      }
-    }, SYNC_RETRY_INTERVAL);
+    await Promise.all([loadEmojiCatalog(), loadData()]);
+    renderAll();
   });
 
-  // ── Custom Modal (replaces native confirm/alert) ────────────
-  /**
-   * Shows a glassmorphism modal in the DOM. Works inside Notion
-   * embed iframes where native confirm()/alert() are suppressed.
-   *
-   * @param {Object} opts - { icon?, title, body, buttons: [{ label, value, className? }] }
-   * @returns {Promise<string>} The `value` of the button clicked
-   */
-  function showModal({ icon, title, body, buttons }) {
-    return new Promise((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.className = 'custom-modal-overlay';
-      overlay.innerHTML = `
-        <div class="custom-modal">
-          ${icon ? `<span class="custom-modal-icon">${icon}</span>` : ''}
-          <div class="custom-modal-title">${title}</div>
-          <div class="custom-modal-body">${body}</div>
-          <div class="custom-modal-actions">
-            ${buttons.map(b =>
-              `<button class="custom-modal-btn ${b.className || ''}" data-value="${b.value}">${b.label}</button>`
-            ).join('')}
-          </div>
-        </div>
-      `;
-
-      overlay.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-value]');
-        if (btn) {
-          overlay.classList.remove('visible');
-          setTimeout(() => { overlay.remove(); resolve(btn.dataset.value); }, 200);
-        }
-      });
-
-      // Close on overlay background click (outside modal)
-      overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) {
-          overlay.classList.remove('visible');
-          setTimeout(() => { overlay.remove(); resolve('cancel'); }, 200);
-        }
-      });
-
-      document.body.appendChild(overlay);
-      requestAnimationFrame(() => overlay.classList.add('visible'));
-    });
-  }
-
-  // ── Toast Notifications ─────────────────────────────────────
-  const TOAST_ICONS = {
-    info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', conflict: '⚡'
-  };
-
-  function showToast(message, type = 'info', duration = 4000) {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `
-      <span class="toast-icon">${TOAST_ICONS[type] || 'ℹ️'}</span>
-      <span class="toast-msg">${message}</span>
-      <button class="toast-dismiss" aria-label="Dismiss">×</button>
-    `;
-
-    toast.querySelector('.toast-dismiss').addEventListener('click', () => {
-      toast.classList.remove('visible');
-      setTimeout(() => toast.remove(), 250);
-    });
-
-    container.appendChild(toast);
-    requestAnimationFrame(() => toast.classList.add('visible'));
-
-    if (duration > 0) {
-      setTimeout(() => {
-        if (toast.parentNode) {
-          toast.classList.remove('visible');
-          setTimeout(() => toast.remove(), 250);
-        }
-      }, duration);
-    }
-  }
-
-  // ── LocalStorage (persistence layer) ────────────────────────
-  function save() {
-    try {
-      const toSave = {
-        habits: state.habits,
-        entries: state.entries,
-        pendingChanges: state.pendingChanges,
-        lastSyncedAt: state.lastSyncedAt,
-        conflictLog: state.conflictLog,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-    } catch (err) {
-      console.error('Failed to save to localStorage:', err);
-    }
-  }
-
-  function loadLocal() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed.habits) state.habits = parsed.habits;
-      if (parsed.entries) state.entries = parsed.entries;
-      if (parsed.pendingChanges) state.pendingChanges = parsed.pendingChanges;
-      if (parsed.lastSyncedAt) state.lastSyncedAt = parsed.lastSyncedAt;
-      if (parsed.conflictLog) state.conflictLog = parsed.conflictLog;
-      loaded = state.habits.length > 0;
-      if (loaded) {
-        setSyncStatus(
-          `Loaded from cache${state.lastSyncedAt ? ` · last synced ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
-          'ok'
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load from localStorage:', err);
-    }
-  }
-
-  // ── Remote Sync (Notion via backend) ────────────────────────
-  async function syncFromRemote() {
-    if (!navigator.onLine) {
-      setSyncStatus(
-        `Offline — showing cached data${state.lastSyncedAt ? ` from ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
-        'offline'
-      );
-      renderSyncBadge();
-      return;
-    }
-
-    setSyncStatus('Syncing with Notion…', null);
-    try {
-      const res = await fetch('/api/data');
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error((body && body.error) || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-
-      const remoteHabits = data.habitNames.map((name, i) => ({
-        name,
-        weight: (data.habitWeights && typeof data.habitWeights[i] === 'number') ? data.habitWeights[i] : 1,
-      }));
-
-      const remoteEntries = {};
-      for (const e of data.entries) {
-        remoteEntries[e.date] = {
-          habits: e.habits,
-          notes: e.notes || '',
-          lastEditedTime: e.lastEditedTime || null,
-        };
-      }
-
-      // Merge remote data with local state (handles conflicts)
-      mergeRemoteData(remoteHabits, remoteEntries);
-
-      state.lastSyncedAt = new Date().toISOString();
-      loaded = true;
-      save();
-      renderAll();
-
-      const pendingCount = state.pendingChanges.length;
-      if (pendingCount > 0) {
-        setSyncStatus(`Synced with Notion · ${pendingCount} local change(s) pending`, 'warning');
-        // Flush pending changes now that we're online
-        flushPendingChanges();
-      } else {
-        setSyncStatus(`Synced with Notion · ${data.entries.length} day(s) loaded`, 'ok');
-      }
-    } catch (err) {
-      console.error('Failed to sync from Notion:', err);
-      if (loaded) {
-        setSyncStatus(
-          `Couldn't reach Notion — showing cached data${state.lastSyncedAt ? ` from ${formatTimeAgo(state.lastSyncedAt)}` : ''}`,
-          'warning'
-        );
-      } else {
-        setSyncStatus(`Couldn't reach Notion: ${err.message}`, 'error');
-      }
-    }
-    renderSyncBadge();
-  }
-
-  // ── Merge Remote Data + Conflict Detection (Phase 4) ────────
-  function mergeRemoteData(remoteHabits, remoteEntries) {
-    // Always take the latest habit list from Notion (schema is authoritative)
-    state.habits = remoteHabits;
-
-    // Build a set of dates with pending local changes
-    const pendingDates = new Map();
-    for (const change of state.pendingChanges) {
-      if (!pendingDates.has(change.date)) {
-        pendingDates.set(change.date, []);
-      }
-      pendingDates.get(change.date).push(change);
-    }
-
-    // Merge entries
-    for (const [date, remote] of Object.entries(remoteEntries)) {
-      const local = state.entries[date];
-
-      if (!pendingDates.has(date)) {
-        // No pending local changes for this date — take remote as-is
-        state.entries[date] = remote;
-        continue;
-      }
-
-      // This date has pending local changes — check for conflicts
-      const localLastEdited = local && local.lastEditedTime;
-      const remoteLastEdited = remote.lastEditedTime;
-
-      if (!localLastEdited || !remoteLastEdited) {
-        // Can't compare timestamps — local changes win (they're queued to sync)
-        // Keep local state, just update lastEditedTime for future comparisons
-        if (local) {
-          state.entries[date] = { ...local, lastEditedTime: remoteLastEdited };
-        }
-        continue;
-      }
-
-      // Compare: has the remote entry been edited since we last synced?
-      const localChanges = pendingDates.get(date);
-      const remoteEditTime = new Date(remoteLastEdited).getTime();
-      const lastSyncTime = state.lastSyncedAt ? new Date(state.lastSyncedAt).getTime() : 0;
-
-      if (remoteEditTime <= lastSyncTime) {
-        // Remote hasn't changed since our last sync — local wins, no conflict
-        if (local) {
-          state.entries[date] = { ...local, lastEditedTime: remoteLastEdited };
-        }
-        continue;
-      }
-
-      // Remote HAS changed independently — conflict!
-      // Apply per-field last-write-wins
-      for (const change of localChanges) {
-        const clientTime = new Date(change.clientTimestamp).getTime();
-
-        if (change.type === 'toggle') {
-          if (clientTime >= remoteEditTime) {
-            // Local toggle is newer — keep local value (will overwrite remote on flush)
-            // No action needed, local state already has this
-          } else {
-            // Remote is newer — drop this pending change, adopt remote
-            state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
-            state.conflictLog.push({
-              date,
-              field: `habits[${change.habitIndex}]`,
-              localValue: change.checked,
-              remoteValue: remote.habits[change.habitIndex],
-              resolution: 'remote-won',
-              resolvedAt: new Date().toISOString(),
-            });
-          }
-        } else if (change.type === 'notes') {
-          if (clientTime >= remoteEditTime) {
-            // Local notes are newer — keep local
-          } else {
-            // Remote is newer — drop local pending change
-            state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
-            state.conflictLog.push({
-              date,
-              field: 'notes',
-              localValue: change.notes,
-              remoteValue: remote.notes,
-              resolution: 'remote-won',
-              resolvedAt: new Date().toISOString(),
-            });
-          }
-        }
-      }
-
-      // After conflict resolution, build the merged entry:
-      // Start from remote, then re-apply any surviving local changes
-      const merged = { ...remote };
-      const survivingChanges = state.pendingChanges.filter(c => c.date === date);
-      for (const change of survivingChanges) {
-        if (change.type === 'toggle') {
-          merged.habits = [...merged.habits];
-          merged.habits[change.habitIndex] = change.checked;
-        } else if (change.type === 'notes') {
-          merged.notes = change.notes;
-        }
-      }
-      state.entries[date] = merged;
-    }
-
-    // Add any local-only dates not in remote (rare, but possible if
-    // a new day started while offline and user toggled habits)
-    for (const date of Object.keys(state.entries)) {
-      if (!remoteEntries[date]) {
-        // Keep local-only entry as-is
-      }
-    }
-
-    // Surface conflicts if any were resolved
-    const recentConflicts = state.conflictLog.filter(c => {
-      const age = Date.now() - new Date(c.resolvedAt).getTime();
-      return age < 60_000; // Show conflicts from the last minute
-    });
-    if (recentConflicts.length > 0) {
-      showToast(
-        `${recentConflicts.length} conflict(s) resolved — remote changes were newer`,
-        'conflict',
-        6000
-      );
-      renderConflictBanner();
-    }
-
-    // Trim old conflict log entries (keep last 50)
-    if (state.conflictLog.length > 50) {
-      state.conflictLog = state.conflictLog.slice(-50);
-    }
-  }
-
-  // ── Sync Queue — Flush pending changes to Notion ────────────
-  async function flushPendingChanges() {
-    if (flushing || !navigator.onLine || state.pendingChanges.length === 0) return;
-    flushing = true;
-
-    // Collapse redundant entries before flushing
-    state.pendingChanges = collapseQueue(state.pendingChanges);
-    save();
-
-    const queue = [...state.pendingChanges];
-
-    for (const change of queue) {
-      change.status = 'syncing';
-      save();
-
-      try {
-        if (change.type === 'toggle') {
-          await postToggle(change);
-        } else if (change.type === 'notes') {
-          await postNotes(change);
-        }
-        // Success: remove from queue
-        state.pendingChanges = state.pendingChanges.filter(c => c.id !== change.id);
-        save();
-      } catch (err) {
-        console.error('Sync failed for change:', change.id, err);
-        change.status = 'failed';
-        save();
-        // Stop on first failure — likely offline again
-        break;
-      }
-    }
-
-    flushing = false;
-    renderSyncBadge();
-
-    if (state.pendingChanges.length === 0) {
-      setSyncStatus('Synced with Notion', 'ok');
-      showToast('All changes synced to Notion', 'success', 3000);
-    } else {
-      setSyncStatus(`${state.pendingChanges.length} change(s) waiting to sync`, 'warning');
-    }
-  }
-
-  function collapseQueue(queue) {
-    const latestByKey = new Map();
-    for (const change of queue) {
-      const key = change.type === 'toggle'
-        ? `toggle:${change.date}:${change.habitIndex}`
-        : `notes:${change.date}`;
-      latestByKey.set(key, change);
-    }
-    return [...latestByKey.values()];
-  }
-
-  async function postToggle(change) {
-    const entry = getEntry(change.date);
-    const weights = state.habits.map(h => h.weight || 1);
-    const res = await fetch('/api/toggle', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        date: change.date,
-        habitIndex: change.habitIndex,
-        checked: change.checked,
-        weights,
-        habitsAfterToggle: entry.habits,
-      }),
-    });
-    if (!res.ok) {
-      const body = await safeJson(res);
-      throw new Error((body && body.error) || `Request failed (${res.status})`);
-    }
-  }
-
-  async function postNotes(change) {
-    const res = await fetch('/api/notes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: change.date, notes: change.notes }),
-    });
-    if (!res.ok) {
-      const body = await safeJson(res);
-      throw new Error((body && body.error) || `Request failed (${res.status})`);
-    }
-  }
-
-  // ── Connectivity Listeners ──────────────────────────────────
-  function onOnline() {
-    showToast('Back online — syncing changes…', 'success', 3000);
-    setSyncStatus('Back online — syncing…', null);
-    flushPendingChanges().then(() => syncFromRemote());
-  }
-
-  function onOffline() {
-    setSyncStatus('Offline — changes will sync when you reconnect', 'offline');
-    showToast('You\'re offline — changes are saved locally', 'warning', 4000);
-    renderSyncBadge();
-  }
-
-  // ── Generate a UUID for sync queue entries ──────────────────
-  function generateId() {
-    return 'xxxx-xxxx-xxxx'.replace(/x/g, () =>
-      Math.floor(Math.random() * 16).toString(16)
-    );
-  }
-
-  // ── Setup Listeners ─────────────────────────────────────────
   function setupListeners() {
     const form = document.getElementById('add-habit-form');
     if (!form) return;
+
+    const iconTrigger = document.getElementById('icon-picker-trigger');
+    if (iconTrigger) {
+      iconTrigger.addEventListener('click', async () => {
+        const excludeHabitName = editingHabitIdx !== null ? state.habits[editingHabitIdx].name : null;
+        const result = await openEmojiPickerModal({ excludeHabitName });
+        if (result) {
+          setFormIcon(result.hexcode, result.emoji);
+        }
+      });
+    }
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const nameInput = document.getElementById('new-habit-name');
       const impInput = document.getElementById('new-habit-importance');
+      const hexInput = document.getElementById('new-habit-hexcode');
       const name = nameInput.value.trim();
       const weight = parseFloat(impInput.value);
+      const hexcode = hexInput.value;
+
       if (!name) return;
 
+      if (!hexcode) {
+        // Nudge the person to the picker instead of failing silently —
+        // a habit needs an icon, and the picker is the only way to pick one.
+        const excludeHabitName = editingHabitIdx !== null ? state.habits[editingHabitIdx].name : null;
+        const result = await openEmojiPickerModal({ excludeHabitName });
+        if (!result) return; // they cancelled — let them try Add again when ready
+        setFormIcon(result.hexcode, result.emoji);
+      }
+
+      const finalHexcode = document.getElementById('new-habit-hexcode').value;
       const btn = document.getElementById('add-habit-btn');
       btn.disabled = true;
 
@@ -524,29 +108,25 @@
           const res = await fetch(`/api/habits/${encodeURIComponent(oldName)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ newName: name, weight }),
+            body: JSON.stringify({ newName: name, weight, hexcode: finalHexcode }),
           });
           if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to update habit.');
           editingHabitIdx = null;
           btn.textContent = 'Add';
-          showToast(`Habit "${name}" updated`, 'success', 3000);
         } else {
           const res = await fetch('/api/habits', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, weight }),
+            body: JSON.stringify({ name, weight, hexcode: finalHexcode }),
           });
           if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to add habit.');
-          showToast(`Habit "${name}" added`, 'success', 3000);
         }
-        nameInput.value = '';
-        impInput.value = '1';
+        resetForm();
         setSyncStatus('Reloading from Notion…', null);
-        await syncFromRemote();
+        await loadData();
         renderAll();
       } catch (err) {
         console.error(err);
-        showToast(`Couldn't save habit: ${err.message}`, 'error', 5000);
         setSyncStatus(`Couldn't save habit: ${err.message}`, 'error');
       } finally {
         btn.disabled = false;
@@ -554,11 +134,35 @@
     });
   }
 
+  function resetForm() {
+    document.getElementById('new-habit-name').value = '';
+    document.getElementById('new-habit-importance').value = '1';
+    setFormIcon('', '');
+  }
+
+  function setFormIcon(hexcode, emojiChar) {
+    document.getElementById('new-habit-hexcode').value = hexcode;
+    const trigger = document.getElementById('icon-picker-trigger');
+    const triggerEmoji = document.getElementById('icon-picker-trigger-emoji');
+    if (!trigger || !triggerEmoji) return;
+
+    if (hexcode) {
+      triggerEmoji.innerHTML = `<img src="${OPENMOJI_DIR}/${hexcode}.png" alt="${escapeHtml(emojiChar || '')}" class="emoji-icon" style="width:18px;height:18px;">`;
+      trigger.classList.add('has-selection');
+      trigger.title = 'Change icon';
+    } else {
+      triggerEmoji.textContent = '🙂';
+      trigger.classList.remove('has-selection');
+      trigger.title = 'Choose an icon';
+    }
+  }
+
   window.editHabit = function (idx) {
     editingHabitIdx = idx;
     const h = state.habits[idx];
     document.getElementById('new-habit-name').value = h.name;
     document.getElementById('new-habit-importance').value = h.weight;
+    setFormIcon(h.hexcode, h.emoji);
     document.getElementById('add-habit-btn').textContent = 'Save';
     document.getElementById('new-habit-name').focus();
   };
@@ -566,18 +170,13 @@
   window.deleteHabit = async function (idx) {
     const h = state.habits[idx];
 
-    // Custom modal instead of native confirm() — works in Notion iframes
-    const result = await showModal({
-      icon: '🗑️',
-      title: `Delete "${h.name}"?`,
-      body: 'This removes the column and <strong>ALL historical data</strong> for it in Notion — this cannot be undone.',
-      buttons: [
-        { label: 'Cancel', value: 'cancel' },
-        { label: 'Delete', value: 'delete', className: 'danger' },
-      ],
+    const confirmed = await openConfirmModal({
+      title: 'Delete this habit?',
+      message: `Delete "${h.name}"? This removes the column and ALL historical data for it in Notion — this cannot be undone.`,
+      confirmLabel: 'Delete habit',
+      danger: true,
     });
-
-    if (result !== 'delete') return;
+    if (!confirmed) return;
 
     try {
       setSyncStatus('Deleting habit in Notion…', null);
@@ -586,97 +185,99 @@
       if (editingHabitIdx === idx) {
         editingHabitIdx = null;
         document.getElementById('add-habit-btn').textContent = 'Add';
-        document.getElementById('new-habit-name').value = '';
+        resetForm();
       }
-      showToast(`Habit "${h.name}" deleted`, 'success', 3000);
-      await syncFromRemote();
+      await loadData();
       renderAll();
     } catch (err) {
       console.error(err);
-      showToast(`Couldn't delete habit: ${err.message}`, 'error', 5000);
       setSyncStatus(`Couldn't delete habit: ${err.message}`, 'error');
     }
   };
 
-  // ── Sync Status Banner ──────────────────────────────────────
+  // ── Data Loading (Notion via backend) ─────────────────────
+  async function loadData() {
+    setSyncStatus('Loading from Notion…', null);
+    try {
+      const res = await fetch('/api/data');
+      if (!res.ok) {
+        const body = await safeJson(res);
+        throw new Error((body && body.error) || `Request failed (${res.status})`);
+      }
+      const data = await res.json();
+
+      state.habits = data.habitNames.map((name, i) => {
+        const weight = (data.habitWeights && typeof data.habitWeights[i] === 'number') ? data.habitWeights[i] : 1;
+        const emojiEntry = (data.habitEmoji && data.habitEmoji[i]) || {};
+        return {
+          name,
+          weight,
+          hexcode: emojiEntry.hexcode || '2728',
+          emoji: emojiEntry.emoji || '✨',
+        };
+      });
+      state.entries = {};
+      for (const e of data.entries) {
+        state.entries[e.date] = { habits: e.habits, notes: e.notes || '' };
+      }
+
+      loaded = true;
+      setSyncStatus(`Synced with Notion · ${data.entries.length} day(s) loaded`, 'ok');
+    } catch (err) {
+      console.error('Failed to load data from Notion:', err);
+      loaded = false;
+      state.habits = [];
+      state.entries = {};
+      setSyncStatus(
+        `Couldn't reach Notion: ${err.message}. Check that the server is running and .env is configured, then refresh.`,
+        'error'
+      );
+    }
+  }
+
+  async function loadEmojiCatalog() {
+    try {
+      const res = await fetch('/emoji-catalog.json');
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      emojiCatalog = await res.json();
+    } catch (err) {
+      console.error('Failed to load emoji catalog:', err);
+      emojiCatalog = [];
+    }
+  }
+
   function setSyncStatus(text, kind) {
     const banner = document.getElementById('sync-status');
     const textEl = document.getElementById('sync-status-text');
     if (!banner || !textEl) return;
     banner.style.display = 'block';
-    banner.classList.remove('ok', 'error', 'warning', 'offline');
+    banner.classList.remove('ok', 'error');
     if (kind) banner.classList.add(kind);
     textEl.textContent = text;
   }
 
-  function renderSyncBadge() {
-    const slot = document.getElementById('sync-badge');
-    if (!slot) return;
-
-    const count = state.pendingChanges.length;
-    if (count === 0) {
-      slot.innerHTML = '';
-      return;
-    }
-
-    slot.innerHTML = `
-      <span class="sync-badge">
-        <span class="pending-dot"></span>
-        <span class="pending-count">${count} pending</span>
-      </span>
-      <button class="sync-retry-btn" onclick="window._retrySync()">Retry now</button>
-    `;
-  }
-
-  window._retrySync = function () {
-    if (navigator.onLine) {
-      flushPendingChanges();
-    } else {
-      showToast('Still offline — will retry when connected', 'warning', 3000);
-    }
-  };
-
-  function renderConflictBanner() {
-    const slot = document.getElementById('conflict-banner-slot');
-    if (!slot) return;
-
-    const recent = state.conflictLog.filter(c => {
-      const age = Date.now() - new Date(c.resolvedAt).getTime();
-      return age < 300_000; // last 5 minutes
-    });
-
-    if (recent.length === 0) {
-      slot.innerHTML = '';
-      return;
-    }
-
-    slot.innerHTML = `
-      <div class="conflict-banner">
-        <span>⚡ ${recent.length} sync conflict(s) resolved (remote was newer)</span>
-        <button class="conflict-banner-dismiss" onclick="this.parentElement.remove()">×</button>
-      </div>
-    `;
-  }
-
-  // ── Helpers ─────────────────────────────────────────────────
   async function safeJson(res) {
     try { return await res.json(); } catch (_) { return null; }
   }
 
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Helpers (unchanged math from the original app.js) ─────
   function dateKey(y, m, d) {
     return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   }
 
   function getEntry(key) {
     if (!state.entries[key]) {
-      state.entries[key] = { habits: new Array(state.habits.length).fill(false), notes: '', lastEditedTime: null };
+      state.entries[key] = { habits: new Array(state.habits.length).fill(false), notes: '' };
     }
-    // Ensure habits array matches current habit count
-    const entry = state.entries[key];
-    while (entry.habits.length < state.habits.length) {
-      entry.habits.push(false);
-    }
-    return entry;
+    return state.entries[key];
   }
 
   function calcPercent(habitsArr) {
@@ -734,15 +335,6 @@
     return dates;
   }
 
-  function formatTimeAgo(isoString) {
-    if (!isoString) return 'never';
-    const seconds = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
-  }
-
   // ── Render All ──────────────────────────────────────────────
   function renderAll() {
     updateTableHeaders();
@@ -753,15 +345,13 @@
     renderHeatMap();
     renderStreakMilestones();
     updateAnalytics();
-    renderSyncBadge();
   }
 
   function updateTableHeaders() {
-    const ths = state.habits.map((h, i) => {
-      const emoji = HABIT_EMOJIS[i % HABIT_EMOJIS.length] || '✨';
+    const ths = state.habits.map((h) => {
       const imp = h.weight === 2 ? '<span style="color:var(--accent-purple)">(H)</span>' :
                   h.weight === 0.5 ? '<span style="color:var(--accent-blue)">(L)</span>' : '';
-      return `<th>${emoji} ${imp}</th>`;
+      return `<th><img src="${OPENMOJI_DIR}/${h.hexcode}.png" alt="${escapeHtml(h.name)}" class="th-emoji-icon" title="${escapeHtml(h.name)}"> ${imp}</th>`;
     }).join('');
 
     const renderHeader = (id) => {
@@ -799,10 +389,11 @@
     if (label) label.textContent = `${MONTHS[state.currentMonth]} ${state.currentYear}`;
   }
 
-  // ── Table Row Generation ────────────────────────────────────
+  // ── Overviews ───────────────────────────────────────────────
   function generateTableRow(dKey, displayDate, isToday) {
     const entry = getEntry(dKey);
     const pct = calcPercent(entry.habits);
+    const disabledAttr = loaded ? '' : 'disabled';
 
     let html = `<tr class="${isToday ? 'today-row' : ''}">`;
     html += `<td style="${isToday ? 'color: var(--accent-purple); font-weight: 700;' : ''}">${displayDate}</td>`;
@@ -812,14 +403,14 @@
     </div></td>`;
 
     for (let h = 0; h < state.habits.length; h++) {
-      html += `<td><input type="checkbox" class="habit-checkbox"
+      html += `<td><input type="checkbox" class="habit-checkbox" ${disabledAttr}
         ${entry.habits[h] ? 'checked' : ''}
         data-date="${dKey}" data-habit="${h}"
         onchange="window.toggleHabit(this)"></td>`;
     }
 
     html += `<td><span class="daily-status ${getStatusClass(pct)}">${getStatusText(pct)}</span></td>`;
-    html += `<td><input type="text" class="notes-input" value="${entry.notes.replace(/"/g, '&quot;')}"
+    html += `<td><input type="text" class="notes-input" ${disabledAttr} value="${entry.notes.replace(/"/g, '&quot;')}"
       data-date="${dKey}" placeholder="—" onchange="window.updateNotes(this)"></td>`;
     html += '</tr>';
     return html;
@@ -863,12 +454,11 @@
     }
 
     container.innerHTML = state.habits.map((h, i) => {
-      const emoji = HABIT_EMOJIS[i % HABIT_EMOJIS.length] || '✨';
       const badgeClass = h.weight === 2 ? 'high' : (h.weight === 0.5 ? 'low' : '');
       const badgeLabel = h.weight === 2 ? 'High' : (h.weight === 0.5 ? 'Low' : 'Norm');
       return `<div class="habit-list-item">
-        <span class="emoji">${emoji}</span>
-        <span>${h.name}</span>
+        <img src="${OPENMOJI_DIR}/${h.hexcode}.png" alt="${escapeHtml(h.name)} icon" class="emoji-icon">
+        <span>${escapeHtml(h.name)}</span>
         <span class="habit-badge ${badgeClass}">${badgeLabel}</span>
         <div class="habit-actions">
            <button type="button" class="icon-btn edit-btn" onclick="editHabit(${i})" title="Edit">✏️</button>
@@ -919,6 +509,16 @@
   }
 
   // ── Streak Milestones ──────────────────────────────────────
+  const STREAK_MILESTONES = [
+    { name: 'First Streak', targetDays: 20, reward: '🎯 Amazing start! You\'ve built a solid foundation.' },
+    { name: 'Consistency Master', targetDays: 30, reward: '🔥 One month strong! You\'re unstoppable.' },
+    { name: 'Habit Warrior', targetDays: 50, reward: '💪 50 days of excellence! You\'re a legend.' },
+    { name: 'Discipline Champion', targetDays: 60, reward: '⚡ 60 days! Nothing can stop you now.' },
+    { name: 'Elite Performer', targetDays: 75, reward: '👑 75 days! You\'re in the top 1%.' },
+    { name: 'Transformation Complete', targetDays: 90, reward: '💎 90 days! You\'ve transformed your life.' },
+    { name: 'Century Club', targetDays: 100, reward: '🏆 100+ Days! Absolute legend status!' },
+  ];
+
   function renderStreakMilestones() {
     const container = document.getElementById('milestones-list');
     if (!container) return;
@@ -1024,39 +624,61 @@
     }
   }
 
-  // ── Write-back: Toggle Habit (local-first) ──────────────────
-  window.toggleHabit = function (el) {
+  // ── Write-back to Notion (via backend) ─────────────────────
+  window.toggleHabit = async function (el) {
     const key = el.dataset.date;
     const habitIdx = parseInt(el.dataset.habit, 10);
     const entry = getEntry(key);
+    const previousValue = entry.habits[habitIdx];
     const nextValue = el.checked;
 
-    // Write to local state immediately
+    // Optimistic UI update — reflect the change immediately, then
+    // confirm with Notion. If the write fails, roll the checkbox
+    // back and surface why, rather than leaving the UI showing a
+    // state Notion doesn't actually have.
     entry.habits[habitIdx] = nextValue;
-    save();
-
-    // Update UI instantly (no network round-trip)
     updateRowDisplay(el, entry);
     renderHeatMap();
     renderStreakMilestones();
     updateAnalytics();
 
-    // Queue the change for remote sync
-    state.pendingChanges.push({
-      id: generateId(),
-      type: 'toggle',
-      date: key,
-      habitIndex: habitIdx,
-      checked: nextValue,
-      clientTimestamp: new Date().toISOString(),
-      status: 'pending',
-    });
-    save();
-    renderSyncBadge();
+    pendingToggles++;
+    setSyncStatus('Saving to Notion…', null);
+    el.disabled = true;
 
-    // If online, kick off sync in the background
-    if (navigator.onLine) {
-      flushPendingChanges();
+    try {
+      const weights = state.habits.map(h => h.weight || 1);
+      const res = await fetch('/api/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          date: key,
+          habitIndex: habitIdx,
+          checked: nextValue,
+          weights,
+          habitsAfterToggle: entry.habits,
+        }),
+      });
+      if (!res.ok) {
+        const body = await safeJson(res);
+        throw new Error((body && body.error) || `Request failed (${res.status})`);
+      }
+    } catch (err) {
+      console.error('Failed to save toggle to Notion:', err);
+      // Roll back
+      entry.habits[habitIdx] = previousValue;
+      el.checked = previousValue;
+      updateRowDisplay(el, entry);
+      renderHeatMap();
+      renderStreakMilestones();
+      updateAnalytics();
+      setSyncStatus(`Couldn't save to Notion: ${err.message}`, 'error');
+    } finally {
+      el.disabled = false;
+      pendingToggles--;
+      if (pendingToggles === 0 && !document.getElementById('sync-status').classList.contains('error')) {
+        setSyncStatus('Synced with Notion', 'ok');
+      }
     }
   };
 
@@ -1064,11 +686,13 @@
     const dateKeyVal = el.dataset.date;
     const pct = calcPercent(entry.habits);
 
-    // Sync the checkbox across every table it appears in
+    // Sync the checkbox itself across every table it appears in
+    // (week + month can both show the same date at once).
     document.querySelectorAll(`input.habit-checkbox[data-date="${dateKeyVal}"][data-habit="${el.dataset.habit}"]`)
       .forEach(cb => { if (cb !== el) cb.checked = el.checked; });
 
-    // Sync progress/status on every row for this date
+    // Sync progress/status on every row for this date, not just the
+    // row containing the checkbox that was clicked.
     document.querySelectorAll(`tr`).forEach(tr => {
       const marker = tr.querySelector(`input.habit-checkbox[data-date="${dateKeyVal}"]`);
       if (!marker) return;
@@ -1084,33 +708,281 @@
     });
   }
 
-  // ── Write-back: Update Notes (local-first) ──────────────────
-  window.updateNotes = function (el) {
+  window.updateNotes = async function (el) {
     const key = el.dataset.date;
     const entry = getEntry(key);
+    const previousNotes = entry.notes;
     entry.notes = el.value;
-    save();
 
-    // Sync across tables
     document.querySelectorAll(`input.notes-input[data-date="${key}"]`)
       .forEach(input => { if (input !== el) input.value = el.value; });
 
-    // Queue for remote sync
-    state.pendingChanges.push({
-      id: generateId(),
-      type: 'notes',
-      date: key,
-      notes: el.value,
-      clientTimestamp: new Date().toISOString(),
-      status: 'pending',
-    });
-    save();
-    renderSyncBadge();
-
-    // If online, kick off sync
-    if (navigator.onLine) {
-      flushPendingChanges();
+    el.disabled = true;
+    setSyncStatus('Saving notes to Notion…', null);
+    try {
+      const res = await fetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: key, notes: el.value }),
+      });
+      if (!res.ok) {
+        const body = await safeJson(res);
+        throw new Error((body && body.error) || `Request failed (${res.status})`);
+      }
+      setSyncStatus('Synced with Notion', 'ok');
+    } catch (err) {
+      console.error('Failed to save notes to Notion:', err);
+      entry.notes = previousNotes;
+      el.value = previousNotes;
+      document.querySelectorAll(`input.notes-input[data-date="${key}"]`)
+        .forEach(input => { input.value = previousNotes; });
+      setSyncStatus(`Couldn't save notes: ${err.message}`, 'error');
+    } finally {
+      el.disabled = false;
     }
   };
+
+  // ════════════════════════════════════════════════════════════
+  // SHARED MODAL
+  // One popup-window component used for both:
+  //   - "confirm" mode: replaces window.confirm() for destructive
+  //     actions (delete habit)
+  //   - "emoji-picker" mode: paginated OpenMoji icon picker for
+  //     Add Habit / Edit Habit
+  // Both modes share the exact same overlay/dialog DOM nodes; only
+  // the inner content block is swapped, so it's genuinely the same
+  // popup window rather than two similar-looking ones.
+  // ════════════════════════════════════════════════════════════
+
+  let modalPendingResolve = null;
+
+  function setupModal() {
+    const overlay = document.getElementById('modal-overlay');
+    if (!overlay) return;
+
+    // Click outside the dialog cancels, same as clicking Cancel.
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) resolveModal(getCancelValueForCurrentMode());
+    });
+
+    // Escape cancels, same as clicking Cancel.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay.classList.contains('open')) {
+        resolveModal(getCancelValueForCurrentMode());
+      }
+    });
+
+    document.getElementById('modal-confirm-cancel').addEventListener('click', () => resolveModal(false));
+    document.getElementById('modal-confirm-ok').addEventListener('click', () => resolveModal(true));
+    document.getElementById('modal-emoji-cancel').addEventListener('click', () => resolveModal(null));
+
+    document.getElementById('emoji-search').addEventListener('input', (e) => {
+      pickerState.query = e.target.value;
+      pickerState.page = 0;
+      renderEmojiPicker();
+    });
+
+    document.getElementById('emoji-page-prev').addEventListener('click', () => {
+      if (pickerState.page > 0) {
+        pickerState.page--;
+        renderEmojiPicker();
+      }
+    });
+
+    document.getElementById('emoji-page-next').addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(filteredCatalog().length / EMOJI_PAGE_SIZE));
+      if (pickerState.page < totalPages - 1) {
+        pickerState.page++;
+        renderEmojiPicker();
+      }
+    });
+  }
+
+  let currentModalMode = null;
+
+  function getCancelValueForCurrentMode() {
+    return currentModalMode === 'confirm' ? false : null;
+  }
+
+  function openModalShell(mode) {
+    currentModalMode = mode;
+    const overlay = document.getElementById('modal-overlay');
+    const confirmContent = document.getElementById('modal-confirm-content');
+    const emojiContent = document.getElementById('modal-emoji-content');
+
+    confirmContent.hidden = mode !== 'confirm';
+    emojiContent.hidden = mode !== 'emoji-picker';
+
+    overlay.classList.add('open');
+
+    // Focus the first sensible interactive element for keyboard users.
+    requestAnimationFrame(() => {
+      if (mode === 'confirm') {
+        document.getElementById('modal-confirm-cancel').focus();
+      } else if (mode === 'emoji-picker') {
+        document.getElementById('emoji-search').focus();
+      }
+    });
+  }
+
+  function closeModalShell() {
+    const overlay = document.getElementById('modal-overlay');
+    overlay.classList.remove('open');
+    currentModalMode = null;
+  }
+
+  function resolveModal(value) {
+    const resolve = modalPendingResolve;
+    modalPendingResolve = null;
+    closeModalShell();
+    if (resolve) resolve(value);
+  }
+
+  /**
+   * Confirm dialog. Resolves true if the person confirmed, false if
+   * they cancelled (Cancel button, overlay click, or Escape).
+   */
+  function openConfirmModal({ title, message, confirmLabel = 'Confirm', danger = false }) {
+    return new Promise((resolve) => {
+      modalPendingResolve = resolve;
+      document.getElementById('modal-confirm-title').textContent = title;
+      document.getElementById('modal-confirm-message').textContent = message;
+      const okBtn = document.getElementById('modal-confirm-ok');
+      okBtn.textContent = confirmLabel;
+      okBtn.className = danger ? 'btn-modal-danger' : 'btn-modal-secondary';
+      openModalShell('confirm');
+    });
+  }
+
+  // ── Emoji Picker ─────────────────────────────────────────────
+
+  let pickerState = {
+    page: 0,
+    category: 'All',
+    query: '',
+    excludeHabitName: null,
+  };
+
+  /**
+   * Opens the icon picker. Resolves { hexcode, emoji } if the person
+   * picked an available icon, or null if they cancelled.
+   *
+   * excludeHabitName: when editing a habit, pass its current name so
+   * its own current icon isn't shown as "taken" by itself.
+   */
+  function openEmojiPickerModal({ excludeHabitName = null } = {}) {
+    return new Promise((resolve) => {
+      modalPendingResolve = resolve;
+      pickerState = { page: 0, category: 'All', query: '', excludeHabitName };
+      renderCategoryChips();
+      renderEmojiPicker();
+      openModalShell('emoji-picker');
+    });
+  }
+
+  function computeTakenMap(excludeHabitName) {
+    // hexcode -> habit name that's using it (excluding the habit
+    // currently being edited, if any)
+    const map = new Map();
+    for (const h of state.habits) {
+      if (excludeHabitName && h.name === excludeHabitName) continue;
+      if (h.hexcode) map.set(h.hexcode, h.name);
+    }
+    return map;
+  }
+
+  function filteredCatalog() {
+    const q = pickerState.query.trim().toLowerCase();
+    return emojiCatalog.filter((e) => {
+      if (pickerState.category !== 'All' && e.category !== pickerState.category) return false;
+      if (q && !e.name.toLowerCase().includes(q) && !e.category.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }
+
+  function renderCategoryChips() {
+    const container = document.getElementById('emoji-category-chips');
+    if (!container) return;
+
+    const categories = ['All', ...new Set(emojiCatalog.map((e) => e.category))];
+    container.innerHTML = categories.map((cat) => {
+      const active = cat === pickerState.category ? 'active' : '';
+      return `<button type="button" class="emoji-category-chip ${active}" data-category="${escapeHtml(cat)}">${escapeHtml(cat)}</button>`;
+    }).join('');
+
+    container.querySelectorAll('.emoji-category-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        pickerState.category = chip.dataset.category;
+        pickerState.page = 0;
+        renderCategoryChips();
+        renderEmojiPicker();
+      });
+    });
+  }
+
+  function renderEmojiPicker() {
+    const grid = document.getElementById('emoji-grid');
+    const hint = document.getElementById('emoji-picker-hint');
+    const pageLabel = document.getElementById('emoji-page-label');
+    const prevBtn = document.getElementById('emoji-page-prev');
+    const nextBtn = document.getElementById('emoji-page-next');
+    if (!grid) return;
+
+    if (!emojiCatalog.length) {
+      grid.innerHTML = `<div class="emoji-grid-empty">Icon set failed to load. Run <code>node scripts/download-openmoji.js</code> and refresh.</div>`;
+      pageLabel.textContent = 'Page 0 of 0';
+      prevBtn.disabled = true;
+      nextBtn.disabled = true;
+      hint.textContent = '';
+      return;
+    }
+
+    const takenMap = computeTakenMap(pickerState.excludeHabitName);
+    const results = filteredCatalog();
+    const totalPages = Math.max(1, Math.ceil(results.length / EMOJI_PAGE_SIZE));
+    pickerState.page = Math.min(pickerState.page, totalPages - 1);
+
+    const start = pickerState.page * EMOJI_PAGE_SIZE;
+    const pageItems = results.slice(start, start + EMOJI_PAGE_SIZE);
+
+    if (pageItems.length === 0) {
+      grid.innerHTML = `<div class="emoji-grid-empty">No icons match "${escapeHtml(pickerState.query)}".</div>`;
+    } else {
+      grid.innerHTML = pageItems.map((e) => {
+        const takenBy = takenMap.get(e.hexcode);
+        const isTaken = !!takenBy;
+        const title = isTaken ? `Already used by "${takenBy}"` : e.name;
+        return `<div class="emoji-cell ${isTaken ? 'taken' : ''}" data-hexcode="${e.hexcode}" data-emoji="${escapeHtml(e.emoji)}" title="${escapeHtml(title)}" role="button" tabindex="${isTaken ? -1 : 0}">
+          <img src="${OPENMOJI_DIR}/${e.hexcode}.png" alt="${escapeHtml(e.name)}" loading="lazy">
+        </div>`;
+      }).join('');
+
+      grid.querySelectorAll('.emoji-cell:not(.taken)').forEach((cell) => {
+        const pick = () => {
+          resolveModal({ hexcode: cell.dataset.hexcode, emoji: cell.dataset.emoji });
+        };
+        cell.addEventListener('click', pick);
+        cell.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            pick();
+          }
+        });
+      });
+    }
+
+    pageLabel.textContent = `Page ${pickerState.page + 1} of ${totalPages}`;
+    prevBtn.disabled = pickerState.page === 0;
+    nextBtn.disabled = pickerState.page >= totalPages - 1;
+
+    const takenCount = results.filter((e) => takenMap.has(e.hexcode)).length;
+    if (takenCount > 0) {
+      hint.textContent = `${results.length} icon${results.length === 1 ? '' : 's'} in this view · ${takenCount} already in use by another habit`;
+      hint.classList.add('warn');
+    } else {
+      hint.textContent = `${results.length} icon${results.length === 1 ? '' : 's'} in this view`;
+      hint.classList.remove('warn');
+    }
+  }
 
 })();

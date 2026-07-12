@@ -5,11 +5,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description"
-    content="Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Synced live with Notion. Works offline.">
+    content="Habit Tracker — Track 10 daily habits with visual heat maps, streak milestones, progress bars, and analytics. Synced live with Notion.">
   <title>Habit Tracker — Live Notion Sync</title>
   <link rel="icon" type="image/png" href="assets/banner.png">
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#0f0f13">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -27,8 +25,6 @@
     <!-- Sync status banner -->
     <div class="section-card" id="sync-status" style="display:none; padding: 10px 16px;">
       <span id="sync-status-text" style="font-size:0.8rem; color: var(--text-secondary);"></span>
-      <span id="sync-badge"></span>
-      <span id="conflict-banner-slot"></span>
     </div>
 
     <!-- Time Left Widget (from source) -->
@@ -81,6 +77,10 @@
         <div class="habit-list-header">
           <span class="habit-list-label">Habit List</span>
           <form class="add-habit-form" id="add-habit-form">
+            <button type="button" id="icon-picker-trigger" class="icon-picker-trigger" aria-haspopup="dialog" title="Choose an icon">
+              <span id="icon-picker-trigger-emoji" class="icon-picker-trigger-emoji">🙂</span>
+            </button>
+            <input type="hidden" id="new-habit-hexcode" value="">
             <input type="text" id="new-habit-name" placeholder="New habit name..." required>
             <select id="new-habit-importance" required>
               <option value="1">Normal (1x)</option>
@@ -224,15 +224,19 @@
           <dd>Celebrate your perfect days when you complete every habit. Build momentum and unlock milestones!</dd>
 
           <dt>Habit List</dt>
-          <dd>Mirrors the checkbox columns in your connected Notion database.</dd>
+          <dd>Mirrors the checkbox columns in your connected Notion database. Each habit carries an icon you choose
+            from the picker — powered by <a href="https://openmoji.org/" target="_blank" rel="noopener">OpenMoji</a>.
+          </dd>
         </dl>
 
         <div class="customization-tips">
           <h3>Customization Tips</h3>
           <ul>
-            <li>To add/remove/rename habits — edit the checkbox columns directly in Notion</li>
+            <li>To add/remove/rename habits — edit the checkbox columns directly in Notion, or use the Add Habit form
+              here</li>
             <li>Checking a box here writes straight back to your Notion database</li>
-            <li>Data is cached locally for offline use — changes sync to Notion when online</li>
+            <li>Each habit needs its own unique icon — pick one from the picker when adding or editing a habit</li>
+            <li>Data is never stored in this browser — every load re-reads Notion live</li>
           </ul>
         </div>
       </div>
@@ -268,22 +272,81 @@
         <h2>Database</h2>
       </div>
       <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
-        This tracker reads and writes to your Notion database via a backend API.
-        Data is cached locally for instant loading and offline use — changes sync
-        automatically when you're online. One row per day, with a checkbox column
-        per habit, a computed progress value, notes, and status.
+        This tracker reads and writes directly to your Notion database via a local backend.
+        One row per day, with a checkbox column per habit, a computed progress value, notes,
+        and status. Nothing is cached in the browser — refresh at any time to see the latest
+        state of your Notion data. Habit icons are stored locally in <code>emoji.json</code>,
+        alongside habit weights in <code>weights.json</code>, since Notion checkbox properties
+        can't hold either.
       </p>
     </div>
 
     <!-- Footer -->
     <footer class="app-footer">
       <p>Habit Tracker — Live Notion Sync</p>
+      <p style="margin-top: var(--space-xs); font-size: 0.68rem;">
+        Habit icons by <a href="https://openmoji.org/" target="_blank" rel="noopener"
+          style="color: var(--text-muted); text-decoration: underline;">OpenMoji</a> — CC BY-SA 4.0
+      </p>
     </footer>
 
   </div>
 
-  <!-- Toast notification container -->
-  <div class="toast-container" id="toast-container"></div>
+  <!-- ═══════════════════════════════════════════════════════
+     SHARED MODAL — one popup window, two modes:
+       - "confirm" mode: replaces window.confirm() for destructive
+         actions (e.g. deleting a habit)
+       - "emoji-picker" mode: paginated OpenMoji icon picker used by
+         the Add Habit and Edit Habit flows
+     Only one instance exists in the DOM; app.js swaps its inner
+     content and behavior depending on which mode opened it, so both
+     flows genuinely share the same popup window rather than two
+     similar-looking ones.
+     ═══════════════════════════════════════════════════════ -->
+  <div class="modal-overlay" id="modal-overlay" role="presentation">
+    <div class="modal-dialog" id="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+
+      <!-- Confirm mode content -->
+      <div id="modal-confirm-content" class="modal-mode-content" hidden>
+        <h3 class="modal-title" id="modal-confirm-title"></h3>
+        <p class="modal-message" id="modal-confirm-message"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-secondary" id="modal-confirm-cancel">Cancel</button>
+          <button type="button" class="btn-modal-danger" id="modal-confirm-ok">Confirm</button>
+        </div>
+      </div>
+
+      <!-- Emoji picker mode content -->
+      <div id="modal-emoji-content" class="modal-mode-content" hidden>
+        <h3 class="modal-title" id="modal-emoji-title">Choose an icon</h3>
+
+        <div class="emoji-picker-controls">
+          <input type="text" id="emoji-search" class="emoji-search-input" placeholder="Search icons…"
+            autocomplete="off">
+          <div class="emoji-category-chips" id="emoji-category-chips">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <p class="emoji-picker-hint" id="emoji-picker-hint"></p>
+
+        <div class="emoji-grid" id="emoji-grid" aria-live="polite">
+          <!-- Rendered by JS -->
+        </div>
+
+        <div class="emoji-pagination">
+          <button type="button" class="icon-btn" id="emoji-page-prev" aria-label="Previous page">◀</button>
+          <span class="emoji-page-label" id="emoji-page-label">Page 1 of 1</span>
+          <button type="button" class="icon-btn" id="emoji-page-next" aria-label="Next page">▶</button>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-secondary" id="modal-emoji-cancel">Cancel</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
 
   <script src="app.js"></script>
 

@@ -7,20 +7,58 @@
  * this file just wires HTTP routes to it and keeps the Notion token
  * server-side only. The token is read from process.env (via dotenv),
  * never sent to the browser, never embedded in any response.
+ *
+ * Habit "weight" (importance) and habit "icon" (OpenMoji emoji) are
+ * both concepts Notion checkbox properties have no room for, so both
+ * are kept in small local JSON sidecars — weights.js / weights.json
+ * and emoji-store.js / emoji.json respectively — keyed by habit name
+ * and kept in sync with Notion on every rename/delete. See the
+ * comments atop each sidecar module for why.
  * ------------------------------------------------------------------
  */
 
 require('dotenv').config();
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const notion = require('./notion');
 const weights = require('./weights');
+const emojiStore = require('./emoji-store');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Emoji catalog (server-side copy, for validation) ──────────────
+// The client ships its own copy of this file (public/emoji-catalog.json)
+// to render the picker, but the server must never trust a hexcode the
+// client sends without checking it against the real, known-good list —
+// otherwise anyone POSTing to /api/habits could set an arbitrary string
+// as a habit's "hexcode", which would then 404 as an <img> src or, worse,
+// never render at all with no indication why. Loaded once at boot since
+// the catalog is static, curated content that ships with the repo and
+// never changes at runtime.
+let EMOJI_CATALOG = [];
+let VALID_HEXCODES = new Set();
+try {
+  const raw = fs.readFileSync(path.join(__dirname, 'public', 'emoji-catalog.json'), 'utf8');
+  EMOJI_CATALOG = JSON.parse(raw);
+  VALID_HEXCODES = new Set(EMOJI_CATALOG.map((e) => e.hexcode));
+  console.log(`Loaded emoji catalog: ${EMOJI_CATALOG.length} icons`);
+} catch (err) {
+  console.error(
+    'WARNING: could not load public/emoji-catalog.json — the emoji picker ' +
+    'and habit-icon validation will not work until this file is present. ' +
+    'Run `node scripts/download-openmoji.js` and confirm the catalog file exists.',
+    err.message
+  );
+}
+
+function catalogEntryFor(hexcode) {
+  return EMOJI_CATALOG.find((e) => e.hexcode === hexcode) || null;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────
 // Mirrors the percent/status logic already in app.js, so values we
@@ -52,6 +90,25 @@ function sendError(res, status, message, err) {
   res.status(status).json({ error: message });
 }
 
+/**
+ * Validates a hexcode against the server's own catalog copy. Returns
+ * the matching catalog entry on success, or null (with the response
+ * already sent) on failure — callers should `return` immediately when
+ * this returns null.
+ */
+function requireValidHexcode(res, hexcode) {
+  if (typeof hexcode !== 'string' || !hexcode.trim()) {
+    sendError(res, 400, 'Invalid or missing icon (hexcode).');
+    return null;
+  }
+  const entry = catalogEntryFor(hexcode);
+  if (!entry) {
+    sendError(res, 400, `"${hexcode}" is not a recognized icon. Pick one from the icon picker.`);
+    return null;
+  }
+  return entry;
+}
+
 // ── Routes ───────────────────────────────────────────────────────
 
 /**
@@ -61,23 +118,44 @@ function sendError(res, status, message, err) {
  * (same shape data/habits.json used to provide, minus weights —
  * Notion has no native "habit weight" concept, so weights default
  * to 1 here; see the note in public/app.js for how that's handled).
+ * habitEmoji mirrors habitWeights: one entry per habit, in the same
+ * order as habitNames, each { hexcode, emoji }. Habits with no
+ * stored icon yet (added directly in Notion, or created before this
+ * feature existed) fall back to a default sparkle icon rather than
+ * leaving a gap in the array.
  */
 app.get('/api/data', async (req, res) => {
   try {
     const { habitNames, entries } = await notion.fetchAllEntries();
     res.json({
       habitNames,
-      habitWeights: habitNames.map(name => weights.getWeight(name)),
-      entries: entries.map(e => ({
+      habitWeights: habitNames.map((name) => weights.getWeight(name)),
+      habitEmoji: habitNames.map((name) => {
+        const stored = emojiStore.getEmoji(name);
+        return stored || { hexcode: emojiStore.DEFAULT_HEXCODE, emoji: emojiStore.DEFAULT_EMOJI };
+      }),
+      entries: entries.map((e) => ({
         date: e.date,
         habits: e.habits,
         notes: e.notes,
-        lastEditedTime: e.lastEditedTime || null,
       })),
     });
   } catch (err) {
     sendError(res, 500, 'Failed to load data from Notion. Check NOTION_TOKEN, NOTION_DATABASE_ID, and that the integration is connected to this database.', err);
   }
+});
+
+/**
+ * GET /api/emoji-catalog
+ * Serves the curated OpenMoji catalog. public/emoji-catalog.json is
+ * already statically served by express.static, so the frontend could
+ * fetch that directly — this route exists mainly so the picker can
+ * confirm it's talking to the same catalog the server validates
+ * against, and as a stable place to extend later (e.g. server-side
+ * search) without changing the static file's shape.
+ */
+app.get('/api/emoji-catalog', (req, res) => {
+  res.json({ icons: EMOJI_CATALOG });
 });
 
 /**
@@ -143,21 +221,45 @@ app.post('/api/notes', async (req, res) => {
 
 /**
  * POST /api/habits
- * body: { name: string, weight: number }
+ * body: { name: string, weight: number, hexcode: string }
  * Adds a new habit: creates a Checkbox property in Notion, then
- * records its weight locally (Notion has no weight concept).
+ * records its weight and icon locally (Notion has no weight or icon
+ * concept).
+ *
+ * A habit must be a unique (name, icon) combination. Name uniqueness
+ * is already enforced by Notion itself (notion.addHabit throws if a
+ * checkbox property with that name exists — see notion.js). Icon
+ * uniqueness is enforced here: no two habits may share the same
+ * OpenMoji icon, so that a glance at the habit list's icons always
+ * identifies a single habit, and so the (name, icon) pair requested
+ * by the product spec can never collide with an existing habit's pair
+ * even if a future rename made two names momentarily similar.
  */
 app.post('/api/habits', async (req, res) => {
-  const { name, weight } = req.body || {};
+  const { name, weight, hexcode } = req.body || {};
 
   if (typeof name !== 'string' || !name.trim()) {
     return sendError(res, 400, 'Invalid or missing habit name.');
   }
   const w = typeof weight === 'number' ? weight : 1;
+  const trimmedName = name.trim();
+
+  const catalogEntry = requireValidHexcode(res, hexcode);
+  if (!catalogEntry) return; // response already sent
+
+  const takenBy = emojiStore.isEmojiTakenByAnotherHabit(hexcode, null);
+  if (takenBy) {
+    return sendError(
+      res,
+      409,
+      `The ${catalogEntry.emoji} icon is already used by "${takenBy}". Each habit needs a unique icon — pick a different one.`
+    );
+  }
 
   try {
-    await notion.addHabit(name.trim());
-    weights.setWeight(name.trim(), w);
+    await notion.addHabit(trimmedName);
+    weights.setWeight(trimmedName, w);
+    emojiStore.setEmoji(trimmedName, hexcode, catalogEntry.emoji);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, 400, err.message, err);
@@ -166,23 +268,53 @@ app.post('/api/habits', async (req, res) => {
 
 /**
  * PUT /api/habits/:name
- * body: { newName?: string, weight?: number }
+ * body: { newName?: string, weight?: number, hexcode?: string }
  * Renames a habit in Notion (if newName given) and/or updates its
- * local weight. :name is URL-encoded by the client.
+ * local weight and/or icon. :name is URL-encoded by the client.
+ *
+ * If hexcode is provided and differs from the habit's current icon,
+ * it's validated against the catalog and checked for uniqueness the
+ * same way POST /api/habits does — excluding this habit itself, so
+ * saving the form without changing the icon never trips the
+ * uniqueness check on its own current value.
  */
 app.put('/api/habits/:name', async (req, res) => {
   const oldName = decodeURIComponent(req.params.name);
-  const { newName, weight } = req.body || {};
+  const { newName, weight, hexcode } = req.body || {};
+
+  let catalogEntry = null;
+  if (typeof hexcode === 'string' && hexcode.trim()) {
+    const current = emojiStore.getEmoji(oldName);
+    const isChanging = !current || current.hexcode !== hexcode;
+
+    catalogEntry = requireValidHexcode(res, hexcode);
+    if (!catalogEntry) return; // response already sent
+
+    if (isChanging) {
+      const takenBy = emojiStore.isEmojiTakenByAnotherHabit(hexcode, oldName);
+      if (takenBy) {
+        return sendError(
+          res,
+          409,
+          `The ${catalogEntry.emoji} icon is already used by "${takenBy}". Each habit needs a unique icon — pick a different one.`
+        );
+      }
+    }
+  }
 
   try {
     let finalName = oldName;
     if (typeof newName === 'string' && newName.trim() && newName.trim() !== oldName) {
       await notion.renameHabit(oldName, newName.trim());
       weights.renameWeight(oldName, newName.trim());
+      emojiStore.renameEmoji(oldName, newName.trim());
       finalName = newName.trim();
     }
     if (typeof weight === 'number') {
       weights.setWeight(finalName, weight);
+    }
+    if (catalogEntry) {
+      emojiStore.setEmoji(finalName, catalogEntry.hexcode, catalogEntry.emoji);
     }
     res.json({ ok: true });
   } catch (err) {
@@ -193,7 +325,8 @@ app.put('/api/habits/:name', async (req, res) => {
 /**
  * DELETE /api/habits/:name
  * Removes the habit's Checkbox property from Notion (and all its
- * historical data — irreversible) plus its local weight entry.
+ * historical data — irreversible) plus its local weight and icon
+ * entries.
  */
 app.delete('/api/habits/:name', async (req, res) => {
   const name = decodeURIComponent(req.params.name);
@@ -201,6 +334,7 @@ app.delete('/api/habits/:name', async (req, res) => {
   try {
     await notion.deleteHabit(name);
     weights.deleteWeight(name);
+    emojiStore.deleteEmoji(name);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, 400, err.message, err);
@@ -218,10 +352,11 @@ app.get('/api/health', async (req, res) => {
     const schema = await notion.loadSchema();
     res.json({
       ok: true,
-      habitsFound: schema.habitProps.map(h => h.name),
+      habitsFound: schema.habitProps.map((h) => h.name),
       progressPropertyType: schema.progressProp ? schema.progressProp.type : null,
       statusPropertyType: schema.statusProp ? schema.statusProp.type : null,
       notesPropertyType: schema.notesProp ? schema.notesProp.type : null,
+      emojiCatalogLoaded: EMOJI_CATALOG.length,
     });
   } catch (err) {
     sendError(res, 500, err.message, err);

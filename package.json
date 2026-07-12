@@ -1,12 +1,14 @@
 {
   "name": "habit-tracker-backend",
   "version": "1.0.0",
-  "description": "Node/Express backend that syncs the Habit Tracker UI with a live Notion database.",
+  "description": "Node/Express backend that syncs the Habit Tracker UI with a live Notion database. Habit icons are powered by OpenMoji (CC BY-SA 4.0).",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "download-icons": "node scripts/download-openmoji.js",
+    "download-icons:force": "node scripts/download-openmoji.js --force"
   },
   "dependencies": {
     "@notionhq/client": "^2.2.15",

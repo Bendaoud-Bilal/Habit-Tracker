@@ -1,0 +1,11 @@
+Icons in this folder are from OpenMoji (https://openmoji.org),
+an open-source emoji and icon project by HfG Schwäbisch Gmünd.
+
+License: CC BY-SA 4.0
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Source repository: https://github.com/hfg-gmuend/openmoji
+This is a curated subset (see public/emoji-catalog.json), not the
+full OpenMoji set, fetched via scripts/download-openmoji.js.
+
+If you redistribute this project, keep this attribution.

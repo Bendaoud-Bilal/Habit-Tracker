@@ -25,7 +25,7 @@ const HABIT_NAMES = [
 const KNOWN_NON_HABIT_PROPS = new Set(['Date', 'Progress', 'Status', 'Notes']);
 
 let notion = null;
-let schemaCache = null; // { properties: {...}, habitProps: [...], progressType, statusType, dateProp, notesProp }
+let schemaCache = null;
 
 function getClient() {
   if (!notion) {
@@ -37,12 +37,6 @@ function getClient() {
   return notion;
 }
 
-/**
- * Inspect the live database schema once and cache it. This is what
- * lets us support either a Formula-based Progress column or a plain
- * Number one, and either a Select-based Status or free Text, without
- * hardcoding an assumption.
- */
 async function loadSchema() {
   if (schemaCache) return schemaCache;
 
@@ -65,14 +59,14 @@ async function loadSchema() {
     if (name === 'Date' && def.type === 'date') {
       dateProp = { name, type: def.type };
     } else if (name === 'Progress') {
-      progressProp = { name, type: def.type }; // 'formula' | 'number' | 'rollup'
+      progressProp = { name, type: def.type };
     } else if (name === 'Status') {
-      statusProp = { name, type: def.type }; // 'select' | 'rich_text' | 'title'
+      statusProp = { name, type: def.type };
       if (def.type === 'select' && def.select && Array.isArray(def.select.options)) {
         statusProp.options = def.select.options.map(o => o.name);
       }
     } else if (name === 'Notes') {
-      notesProp = { name, type: def.type }; // 'rich_text' typically
+      notesProp = { name, type: def.type };
     } else if (def.type === 'checkbox' && !KNOWN_NON_HABIT_PROPS.has(name)) {
       habitProps.push({ name, type: def.type });
     }
@@ -91,10 +85,6 @@ async function loadSchema() {
     );
   }
 
-  // Order habit columns to match HABIT_NAMES where possible, so the
-  // UI's fixed emoji/weight ordering lines up with real data. Any
-  // checkbox column not in HABIT_NAMES is appended after, so nothing
-  // gets silently dropped if you've renamed or added a habit in Notion.
   habitProps.sort((a, b) => {
     const ai = HABIT_NAMES.indexOf(a.name);
     const bi = HABIT_NAMES.indexOf(b.name);
@@ -108,7 +98,6 @@ async function loadSchema() {
   return schemaCache;
 }
 
-/** Force a re-read of the schema next time it's needed (e.g. after a manual DB edit). */
 function invalidateSchemaCache() {
   schemaCache = null;
 }
@@ -131,13 +120,6 @@ function extractNotesValue(page, notesProp) {
   return '';
 }
 
-/**
- * Pull every row from the Notion database and convert it into the
- * {habits, entries} shape the front end (app.js) already knows how
- * to render. Progress/Status are read as-is from Notion (whatever
- * the formula computes) rather than recomputed here, so the server
- * and Notion never disagree about the numbers.
- */
 async function fetchAllEntries() {
   const client = getClient();
   const schema = await loadSchema();
@@ -156,7 +138,7 @@ async function fetchAllEntries() {
 
     for (const page of res.results) {
       const date = extractDateValue(page, dateProp);
-      if (!date) continue; // skip rows with no date set — nothing to key them by
+      if (!date) continue;
 
       const habits = habitProps.map(hp => {
         const val = page.properties[hp.name];
@@ -168,7 +150,6 @@ async function fetchAllEntries() {
         date,
         habits,
         notes: extractNotesValue(page, notesProp),
-        lastEditedTime: page.last_edited_time || null,
       });
     }
 
@@ -181,15 +162,6 @@ async function fetchAllEntries() {
   };
 }
 
-/**
- * Toggle a single habit checkbox on a single day's Notion page.
- * If no page exists yet for that date, one is created first.
- * Progress/Status are left untouched here — if they're Formula/Rollup
- * properties, Notion recalculates them server-side automatically; if
- * they turn out to be plain Number/Select, updateComputedFields()
- * (called by the route layer) fills them in afterward from the same
- * math app.js already uses on the client.
- */
 async function setHabitValue({ date, habitIndex, checked }) {
   const client = getClient();
   const schema = await loadSchema();
@@ -253,15 +225,6 @@ async function updateNotesValue({ date, notes }) {
   return created.id;
 }
 
-/**
- * If Progress/Status turn out NOT to be Formula/Select-auto types
- * (i.e. they're plain Number / free Text), this writes the
- * client-computed percentage and status label into Notion so the
- * database stays in sync. If they ARE Formula/Rollup or Select we
- * skip writing to them — Notion (Formula) or the user (Select
- * dropdown) owns that value, and writing to a Formula property
- * would be rejected by the API anyway.
- */
 async function updateComputedFields({ date, percent, statusText }) {
   const schema = await loadSchema();
   const { progressProp, statusProp, dateProp, dbId } = schema;
@@ -274,15 +237,12 @@ async function updateComputedFields({ date, percent, statusText }) {
   if (statusProp && statusProp.type === 'rich_text') {
     properties[statusProp.name] = { rich_text: [{ text: { content: statusText } }] };
   }
-  // select-type Status is intentionally left alone: writing an
-  // arbitrary string to it either fails or creates a new dropdown
-  // option, neither of which we want to do silently.
 
-  if (Object.keys(properties).length === 0) return; // nothing writable here
+  if (Object.keys(properties).length === 0) return;
 
   const client = getClient();
   const existing = await findPageByDate(date);
-  if (!existing) return; // habit write should have created the page already
+  if (!existing) return;
 
   await client.pages.update({ page_id: existing.id, properties });
 }
@@ -304,12 +264,6 @@ async function findPageByDate(date) {
   return res.results[0] || null;
 }
 
-/**
- * Add a new habit as a Checkbox property on the Notion database.
- * This is a schema-level write (databases.update), not a page write —
- * more sensitive than pages.update, so we validate the name isn't
- * already taken and isn't one of the reserved column names first.
- */
 async function addHabit(habitName) {
   const client = getClient();
   const schema = await loadSchema();
@@ -334,16 +288,9 @@ async function addHabit(habitName) {
   });
 
   invalidateSchemaCache();
-  return loadSchema(); // re-load so caller gets the fresh property list
+  return loadSchema();
 }
 
-/**
- * Rename an existing habit's Notion checkbox property.
- * Historical checked/unchecked data on every page is preserved —
- * Notion keeps page property values when you rename the property
- * that holds them, since the rename operates on the property
- * definition, not on each page's stored value.
- */
 async function renameHabit(oldName, newName) {
   const client = getClient();
   const schema = await loadSchema();
@@ -375,13 +322,6 @@ async function renameHabit(oldName, newName) {
   return loadSchema();
 }
 
-/**
- * Delete a habit's Notion checkbox property entirely. This removes
- * the column and ALL historical data for it — Notion has no
- * "archive a property" concept, unlike pages. Callers (the route
- * layer) should confirm with the user before calling this, same as
- * the original app.js's confirm() dialog on deleteHabit.
- */
 async function deleteHabit(habitName) {
   const client = getClient();
   const schema = await loadSchema();
@@ -398,7 +338,7 @@ async function deleteHabit(habitName) {
   await client.databases.update({
     database_id: dbId,
     properties: {
-      [habitName]: null, // null removes the property in Notion's API
+      [habitName]: null,
     },
   });
 
