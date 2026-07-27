@@ -46,6 +46,8 @@
     entries: {},           // key: 'YYYY-MM-DD' → { habits: [bool×N], notes: string }
     currentMonth: new Date().getMonth(),
     currentYear: new Date().getFullYear(),
+    weekOffsetDays: 0,
+    todayDate: new Date(),
   };
 
   let charts = { trend: null, donut: null, bar: null };
@@ -59,6 +61,25 @@
   document.addEventListener('DOMContentLoaded', async () => {
     setupModal();
     setupListeners();
+
+    // Fetch real time from online to prevent device time cheating
+    try {
+      const timeRes = await fetch('https://worldtimeapi.org/api/ip');
+      if (timeRes.ok) {
+        const timeData = await timeRes.json();
+        const onlineDate = new Date(timeData.datetime);
+        if (!isNaN(onlineDate.getTime())) {
+          state.todayDate = onlineDate;
+        }
+      }
+    } catch (e) {
+      console.warn("Could not fetch time from worldtimeapi, falling back to local device time", e);
+    }
+    
+    // Sync month overview and heatmap to current real date
+    state.currentMonth = state.todayDate.getMonth();
+    state.currentYear = state.todayDate.getFullYear();
+
     await Promise.all([loadEmojiCatalog(), loadData()]);
     renderAll();
   });
@@ -209,12 +230,19 @@
       state.habits = data.habitNames.map((name, i) => {
         const weight = (data.habitWeights && typeof data.habitWeights[i] === 'number') ? data.habitWeights[i] : 1;
         const emojiEntry = (data.habitEmoji && data.habitEmoji[i]) || {};
+        const slotPosition = (data.habitSlotOrder && typeof data.habitSlotOrder[i] === 'number') ? data.habitSlotOrder[i] : Infinity;
         return {
           name,
           weight,
           hexcode: emojiEntry.hexcode || '2728',
           emoji: emojiEntry.emoji || '✨',
+          slotPosition,
+          notionIndex: i
         };
+      });
+      state.habits.sort((a, b) => {
+        if (a.slotPosition === b.slotPosition) return a.notionIndex - b.notionIndex;
+        return a.slotPosition - b.slotPosition;
       });
       state.entries = {};
       for (const e of data.entries) {
@@ -286,7 +314,7 @@
     for (let i = 0; i < state.habits.length; i++) {
       const w = state.habits[i].weight || 1;
       maxScore += w;
-      if (habitsArr[i]) actualScore += w;
+      if (habitsArr[state.habits[i].notionIndex]) actualScore += w;
     }
     if (maxScore === 0) return 0;
     return Math.round((actualScore / maxScore) * 100);
@@ -324,12 +352,10 @@
   }
 
   function getWeekDates() {
-    const today = new Date();
-    const dayOfWeek = today.getDay();
     const dates = [];
     for (let i = 0; i < 7; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - dayOfWeek + i);
+      const d = new Date(state.todayDate);
+      d.setDate(state.todayDate.getDate() + state.weekOffsetDays + i);
       dates.push(d);
     }
     return dates;
@@ -339,6 +365,7 @@
   function renderAll() {
     updateTableHeaders();
     renderMonthNav();
+    renderWeekNav();
     renderWeekOverview();
     renderMonthOverview();
     renderHabitList();
@@ -348,10 +375,14 @@
   }
 
   function updateTableHeaders() {
-    const ths = state.habits.map((h) => {
+    const ths = state.habits.map((h, i) => {
       const imp = h.weight === 2 ? '<span style="color:var(--accent-purple)">(H)</span>' :
                   h.weight === 0.5 ? '<span style="color:var(--accent-blue)">(L)</span>' : '';
-      return `<th><img src="${OPENMOJI_DIR}/${h.hexcode}.png" alt="${escapeHtml(h.name)}" class="th-emoji-icon" title="${escapeHtml(h.name)}"> ${imp}</th>`;
+      return `<th>
+        <img src="${OPENMOJI_DIR}/${h.hexcode}.png" alt="${escapeHtml(h.name)}" class="th-emoji-icon" title="${escapeHtml(h.name)}">
+        <div class="th-slot-number">${i + 1}</div>
+        ${imp}
+      </th>`;
     }).join('');
 
     const renderHeader = (id) => {
@@ -363,6 +394,35 @@
     };
     renderHeader('week-table');
     renderHeader('month-table');
+  }
+
+  // ── Week Navigation ─────────────────────────────────────────
+  window.prevWeek = function () {
+    state.weekOffsetDays -= 7;
+    renderWeekNav();
+    renderWeekOverview();
+  };
+
+  window.nextWeek = function () {
+    state.weekOffsetDays += 7;
+    renderWeekNav();
+    renderWeekOverview();
+  };
+
+  function renderWeekNav() {
+    const label = document.getElementById('week-label');
+    if (!label) return;
+    if (state.weekOffsetDays === 0) {
+      label.textContent = 'Next 7 Days';
+    } else {
+      const d1 = new Date(state.todayDate);
+      d1.setDate(d1.getDate() + state.weekOffsetDays);
+      const d2 = new Date(d1);
+      d2.setDate(d2.getDate() + 6);
+      const m1 = MONTHS[d1.getMonth()].slice(0, 3);
+      const m2 = MONTHS[d2.getMonth()].slice(0, 3);
+      label.textContent = `${m1} ${d1.getDate()} - ${m2} ${d2.getDate()}`;
+    }
   }
 
   // ── Month Navigation ────────────────────────────────────────
@@ -403,9 +463,10 @@
     </div></td>`;
 
     for (let h = 0; h < state.habits.length; h++) {
+      const notionIdx = state.habits[h].notionIndex;
       html += `<td><input type="checkbox" class="habit-checkbox" ${disabledAttr}
-        ${entry.habits[h] ? 'checked' : ''}
-        data-date="${dKey}" data-habit="${h}"
+        ${entry.habits[notionIdx] ? 'checked' : ''}
+        data-date="${dKey}" data-habit="${notionIdx}"
         onchange="window.toggleHabit(this)"></td>`;
     }
 
@@ -423,7 +484,7 @@
     tbody.innerHTML = weekDates.map(d => {
       const key = dateKey(d.getFullYear(), d.getMonth(), d.getDate());
       const display = `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
-      const isToday = d.toDateString() === new Date().toDateString();
+      const isToday = d.toDateString() === state.todayDate.toDateString();
       return generateTableRow(key, display, isToday);
     }).join('');
   }
@@ -432,12 +493,11 @@
     const tbody = document.getElementById('month-tbody');
     if (!tbody) return;
     const days = daysInMonth(state.currentYear, state.currentMonth);
-    const today = new Date();
     let html = '';
     for (let d = 1; d <= days; d++) {
       const key = dateKey(state.currentYear, state.currentMonth, d);
       const display = `${MONTHS[state.currentMonth].slice(0, 3)} ${d}`;
-      const isToday = d === today.getDate() && state.currentMonth === today.getMonth() && state.currentYear === today.getFullYear();
+      const isToday = d === state.todayDate.getDate() && state.currentMonth === state.todayDate.getMonth() && state.currentYear === state.todayDate.getFullYear();
       html += generateTableRow(key, display, isToday);
     }
     tbody.innerHTML = html;
@@ -456,7 +516,8 @@
     container.innerHTML = state.habits.map((h, i) => {
       const badgeClass = h.weight === 2 ? 'high' : (h.weight === 0.5 ? 'low' : '');
       const badgeLabel = h.weight === 2 ? 'High' : (h.weight === 0.5 ? 'Low' : 'Norm');
-      return `<div class="habit-list-item">
+      return `<div class="habit-list-item" draggable="true" data-index="${i}">
+        <span class="habit-slot-number">#${i + 1}</span>
         <img src="${OPENMOJI_DIR}/${h.hexcode}.png" alt="${escapeHtml(h.name)} icon" class="emoji-icon">
         <span>${escapeHtml(h.name)}</span>
         <span class="habit-badge ${badgeClass}">${badgeLabel}</span>
@@ -466,6 +527,79 @@
         </div>
       </div>`;
     }).join('');
+
+    // Setup drag and drop
+    const items = container.querySelectorAll('.habit-list-item');
+    items.forEach(item => {
+      item.addEventListener('dragstart', handleDragStart);
+      item.addEventListener('dragover', handleDragOver);
+      item.addEventListener('dragleave', handleDragLeave);
+      item.addEventListener('drop', handleDrop);
+      item.addEventListener('dragend', handleDragEnd);
+    });
+  }
+
+  let dragSrcEl = null;
+
+  function handleDragStart(e) {
+    dragSrcEl = this;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', this.dataset.index);
+    this.classList.add('dragging');
+  }
+
+  function handleDragOver(e) {
+    if (e.preventDefault) e.preventDefault(); // Necessary. Allows us to drop.
+    e.dataTransfer.dropEffect = 'move';
+    if (dragSrcEl !== this) {
+      this.classList.add('drag-over');
+    }
+    return false;
+  }
+
+  function handleDragLeave(e) {
+    this.classList.remove('drag-over');
+  }
+
+  async function handleDrop(e) {
+    if (e.stopPropagation) e.stopPropagation();
+    this.classList.remove('drag-over');
+
+    if (dragSrcEl !== this) {
+      const fromIndex = parseInt(dragSrcEl.dataset.index, 10);
+      const toIndex = parseInt(this.dataset.index, 10);
+
+      // Reorder state array
+      const movedHabit = state.habits.splice(fromIndex, 1)[0];
+      state.habits.splice(toIndex, 0, movedHabit);
+
+      // Re-render UI immediately
+      renderAll();
+
+      // Save new order to backend
+      const newOrder = state.habits.map(h => h.name);
+      setSyncStatus('Saving new order…', null);
+      try {
+        const res = await fetch('/api/habits/reorder', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order: newOrder }),
+        });
+        if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to save order.');
+        setSyncStatus('Synced with Notion', 'ok');
+      } catch (err) {
+        console.error(err);
+        setSyncStatus(`Couldn't save order: ${err.message}`, 'error');
+        await loadData();
+        renderAll();
+      }
+    }
+    return false;
+  }
+
+  function handleDragEnd(e) {
+    this.classList.remove('dragging');
+    document.querySelectorAll('.habit-list-item').forEach(el => el.classList.remove('drag-over'));
   }
 
   // ── Heat Map ────────────────────────────────────────────────
@@ -586,7 +720,7 @@
           for (let i = 0; i < state.habits.length; i++) {
             const w = state.habits[i].weight || 1;
             maxScore += w;
-            if (state.entries[key].habits[i]) actualScore += w;
+            if (state.entries[key].habits[state.habits[i].notionIndex]) actualScore += w;
           }
         }
       }
@@ -610,7 +744,7 @@
         if (state.entries[key]) {
           daysLogged++;
           for (let i = 0; i < state.habits.length; i++) {
-            if (state.entries[key].habits[i]) data[i]++;
+            if (state.entries[key].habits[state.habits[i].notionIndex]) data[i]++;
           }
         }
       }
@@ -647,7 +781,12 @@
     el.disabled = true;
 
     try {
-      const weights = state.habits.map(h => h.weight || 1);
+      // Get weights in Notion schema order to match habitsAfterToggle
+      const weightsInNotionOrder = [];
+      state.habits.forEach(h => {
+        weightsInNotionOrder[h.notionIndex] = h.weight || 1;
+      });
+
       const res = await fetch('/api/toggle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -655,7 +794,7 @@
           date: key,
           habitIndex: habitIdx,
           checked: nextValue,
-          weights,
+          weights: weightsInNotionOrder,
           habitsAfterToggle: entry.habits,
         }),
       });

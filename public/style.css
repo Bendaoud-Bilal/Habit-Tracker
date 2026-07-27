@@ -382,6 +382,20 @@ body::before {
   transition: all var(--transition-fast);
 }
 
+.habit-list-item[draggable="true"] {
+  cursor: grab;
+}
+
+.habit-list-item.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.habit-list-item.drag-over {
+  border-left: 3px solid var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
 .habit-list-item:hover {
   background: var(--accent-purple-glow);
   border-color: rgba(167, 139, 250, 0.2);
@@ -485,6 +499,21 @@ body::before {
   object-fit: contain;
   vertical-align: middle;
   display: inline-block;
+}
+
+.th-slot-number {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-top: 2px;
+  line-height: 1;
+}
+
+.habit-slot-number {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-right: 4px;
 }
 
 .habit-list-item .emoji-icon {

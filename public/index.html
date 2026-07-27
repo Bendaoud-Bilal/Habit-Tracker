@@ -33,18 +33,19 @@
         title="Time left in month" loading="lazy"></iframe>
     </div>
 
-    <!-- Month Navigation (shared by month overview + heat map) -->
-    <div class="month-nav" id="month-nav">
-      <button onclick="prevMonth()" aria-label="Previous month">◀</button>
-      <span class="month-label" id="month-label">July 2026</span>
-      <button onclick="nextMonth()" aria-label="Next month">▶</button>
-    </div>
 
     <!-- ── 1. Week Overview ────────────────────────────────── -->
     <div class="section-card" id="section-week">
-      <div class="section-header">
-        <div class="icon calendar-week">📅</div>
-        <h2>Week Overview</h2>
+      <div class="section-header" style="justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+          <div class="icon calendar-week">📅</div>
+          <h2>Week Overview</h2>
+        </div>
+        <div class="month-nav" id="week-nav" style="margin-bottom: 0;">
+          <button onclick="prevWeek()" aria-label="Previous week">◀</button>
+          <span class="month-label" id="week-label">Next 7 Days</span>
+          <button onclick="nextWeek()" aria-label="Next week">▶</button>
+        </div>
       </div>
       <div class="table-wrapper">
         <table class="data-table" id="week-table">
@@ -94,6 +95,14 @@
           <!-- Rendered by JS -->
         </div>
       </div>
+    </div>
+
+
+        <!-- Month Navigation (shared by month overview + heat map) -->
+    <div class="month-nav" id="month-nav">
+      <button onclick="prevMonth()" aria-label="Previous month">◀</button>
+      <span class="month-label" id="month-label">July 2026</span>
+      <button onclick="nextMonth()" aria-label="Next month">▶</button>
     </div>
 
     <!-- ── 3. Full Month Overview ──────────────────────────── -->

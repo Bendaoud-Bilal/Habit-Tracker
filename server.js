@@ -24,6 +24,7 @@ const path = require('path');
 const notion = require('./notion');
 const weights = require('./weights');
 const emojiStore = require('./emoji-store');
+const slotOrder = require('./slot-order');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -134,6 +135,7 @@ app.get('/api/data', async (req, res) => {
         const stored = emojiStore.getEmoji(name);
         return stored || { hexcode: emojiStore.DEFAULT_HEXCODE, emoji: emojiStore.DEFAULT_EMOJI };
       }),
+      habitSlotOrder: habitNames.map((name) => slotOrder.getOrder(name)),
       entries: entries.map((e) => ({
         date: e.date,
         habits: e.habits,
@@ -260,6 +262,7 @@ app.post('/api/habits', async (req, res) => {
     await notion.addHabit(trimmedName);
     weights.setWeight(trimmedName, w);
     emojiStore.setEmoji(trimmedName, hexcode, catalogEntry.emoji);
+    slotOrder.setOrder(trimmedName, slotOrder.getNextPosition());
     res.json({ ok: true });
   } catch (err) {
     sendError(res, 400, err.message, err);
@@ -308,6 +311,7 @@ app.put('/api/habits/:name', async (req, res) => {
       await notion.renameHabit(oldName, newName.trim());
       weights.renameWeight(oldName, newName.trim());
       emojiStore.renameEmoji(oldName, newName.trim());
+      slotOrder.renameOrder(oldName, newName.trim());
       finalName = newName.trim();
     }
     if (typeof weight === 'number') {
@@ -335,9 +339,40 @@ app.delete('/api/habits/:name', async (req, res) => {
     await notion.deleteHabit(name);
     weights.deleteWeight(name);
     emojiStore.deleteEmoji(name);
+    slotOrder.deleteOrder(name);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, 400, err.message, err);
+  }
+});
+
+/**
+ * PUT /api/habits/reorder
+ * body: { order: ["habit1", "habit2", ...] }
+ * Saves the user-defined slot order immediately. Called on every
+ * drag-and-drop reorder in the habit list — no form submission
+ * required, the new order persists the instant the drop lands.
+ */
+app.put('/api/habits/reorder', async (req, res) => {
+  const { order } = req.body || {};
+
+  if (!Array.isArray(order) || order.length === 0) {
+    return sendError(res, 400, 'Invalid or missing order (expected non-empty array of habit names).');
+  }
+
+  // Validate that every name in the order array is a real habit
+  try {
+    const schema = await notion.loadSchema();
+    const knownNames = new Set(schema.habitProps.map((h) => h.name));
+    for (const name of order) {
+      if (typeof name !== 'string' || !knownNames.has(name)) {
+        return sendError(res, 400, `"${name}" is not a recognized habit name.`);
+      }
+    }
+    slotOrder.bulkSetOrder(order);
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, 500, 'Failed to save habit order.', err);
   }
 });
 
