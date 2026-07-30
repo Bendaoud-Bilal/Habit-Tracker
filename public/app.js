@@ -586,7 +586,7 @@
           body: JSON.stringify({ order: newOrder }),
         });
         if (!res.ok) throw new Error((await safeJson(res))?.error || 'Failed to save order.');
-        setSyncStatus('Synced with Notion', 'ok');
+        setSyncStatus('Order saved locally', 'ok');
       } catch (err) {
         console.error(err);
         setSyncStatus(`Couldn't save order: ${err.message}`, 'error');
